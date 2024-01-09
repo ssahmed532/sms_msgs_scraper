@@ -77,7 +77,9 @@ class HBLSmsParser:
     def printAllVendors(self):
         print(f"Found {len(self.all_vendors)} unique Vendors from parsed SMS messages:")
         print()
-        for index, vendor in enumerate(self.all_vendors, start=1):
+
+        sorted_vendors = sorted(self.all_vendors)
+        for index, vendor in enumerate(sorted_vendors, start=1):
             print(f"Vendor {index}: [{vendor}]")
 
     def printCCTxns(self):
