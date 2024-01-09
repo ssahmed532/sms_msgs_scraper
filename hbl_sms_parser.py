@@ -2,6 +2,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from cc_txn import CreditCardTxnDC
+from cc_txn import TxnTuple
 
 
 class HBLSmsParser:
@@ -12,6 +13,9 @@ class HBLSmsParser:
 
     HBL_CC_TXN_RE = r"Dear Customer, Your HBL CreditCard \(ending with (?P<last4digits>\d{4})\) has been charged at (?P<vendor>.*) for (?P<txnamount>.*) on (?P<txndate>.*)"
     HBL_CC_TXN_PTTRN = re.compile(HBL_CC_TXN_RE)
+    HBL_CC_TXN_AMOUNT_RE = (
+        r"(?P<currency>.*)-(?P<amount>\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b)"
+    )
 
     def __init__(self):
         self.xml_tree = None
@@ -32,6 +36,29 @@ class HBLSmsParser:
             return True
 
         return False
+
+    @staticmethod
+    def _extractCurrencyAndAmount(str_value) -> TxnTuple:
+        currency = None
+        amount = -1.2345
+
+        pattern = re.compile(HBLSmsParser.HBL_CC_TXN_AMOUNT_RE)
+        m = pattern.match(str_value)
+        if m:
+            # print(m.groupdict())
+            # print(f'Parsed currency: [{m.group("currency").strip()}]')
+            # print(f'Parsed amount:   [{m.group("amount").strip()}]')
+
+            currency = m.group("currency").strip()
+            try:
+                amount = float(m.group("amount").strip().replace(",", ""))
+                return TxnTuple(currency, amount)
+            except ValueError:
+                print(
+                    f'ERROR: unable to parse txn amount into float value: {m.group("amount").strip()}'
+                )
+
+        return TxnTuple(currency, amount)
 
     @staticmethod
     def _extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC:
