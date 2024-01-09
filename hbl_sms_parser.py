@@ -51,12 +51,21 @@ class HBLSmsParser:
             # parse CC txn details into the correct types
             # after the necessary validation.
 
+            try:
+                str_value = m.group("last4digits").strip()
+                ccLast4Digits = int(str_value)
+            except ValueError:
+                ccLast4Digits = -1
+                print(
+                    f"ERROR: unable to parse the last 4 digits of the CC for txn: {str_value}"
+                )
+
             ccTxn = CreditCardTxnDC(
                 amount=m.group("txnamount").strip(),
                 currency=HBLSmsParser.DEFAULT_CURRENCY,
                 date=m.group("txndate").strip(),
                 vendor=m.group("vendor").strip(),
-                ccLastFourDigits=m.group("last4digits").strip(),
+                ccLastFourDigits=ccLast4Digits,
             )
         else:
             print(f'ERROR: unable to match RE against SMS msg: {sms.attrib["body"]}')
@@ -116,6 +125,7 @@ class HBLSmsParser:
                     assert ccTxn.amount
                     assert ccTxn.date
                     assert ccTxn.vendor
+                    assert ccTxn.ccLastFourDigits > 0
 
                     count += 1
 
