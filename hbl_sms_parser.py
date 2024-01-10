@@ -2,7 +2,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from cc_txn import CreditCardTxnDC
-from cc_txn import TxnTuple
+from cc_txn import CurrencyAmountTuple
 
 
 class HBLSmsParser:
@@ -38,7 +38,7 @@ class HBLSmsParser:
         return False
 
     @staticmethod
-    def _extractCurrencyAndAmount(str_value) -> TxnTuple:
+    def _extractCurrencyAndAmount(str_value) -> CurrencyAmountTuple:
         currency = None
         amount = -1.2345
 
@@ -52,13 +52,13 @@ class HBLSmsParser:
             currency = m.group("currency").strip()
             try:
                 amount = float(m.group("amount").strip().replace(",", ""))
-                return TxnTuple(currency, amount)
+                return CurrencyAmountTuple(currency, amount)
             except ValueError:
                 print(
                     f'ERROR: unable to parse txn amount into float value: {m.group("amount").strip()}'
                 )
 
-        return TxnTuple(currency, amount)
+        return CurrencyAmountTuple(currency, amount)
 
     @staticmethod
     def _extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC:
@@ -87,9 +87,12 @@ class HBLSmsParser:
                     f"ERROR: unable to parse the last 4 digits of the CC for txn: {str_value}"
                 )
 
+            amount_value = m.group("txnamount").strip()
+            currencyAndAmount = HBLSmsParser._extractCurrencyAndAmount(amount_value)
+            assert currencyAndAmount.currency and (currencyAndAmount.amount > 0)
+
             ccTxn = CreditCardTxnDC(
-                amount=m.group("txnamount").strip(),
-                currency=HBLSmsParser.DEFAULT_CURRENCY,
+                amountTuple=currencyAndAmount,
                 date=m.group("txndate").strip(),
                 vendor=m.group("vendor").strip(),
                 ccLastFourDigits=ccLast4Digits,
@@ -149,7 +152,8 @@ class HBLSmsParser:
                 # self._printSmsBody(child)
                 ccTxn = self._extractDetailsFromTxnMsg(child)
                 if ccTxn:
-                    assert ccTxn.amount
+                    assert ccTxn.amountTuple.currency
+                    assert ccTxn.amountTuple.amount > 0
                     assert ccTxn.date
                     assert ccTxn.vendor
                     assert ccTxn.ccLastFourDigits > 0
@@ -157,7 +161,6 @@ class HBLSmsParser:
                     count += 1
 
                     self.all_vendors.add(ccTxn.vendor)
-                    # print(ccTxnDetails)
                     self.cc_txns.append(ccTxn)
 
         return count
