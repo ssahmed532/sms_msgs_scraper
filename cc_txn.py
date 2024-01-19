@@ -1,5 +1,6 @@
 from collections import namedtuple
 from dataclasses import dataclass
+from datetime import datetime
 
 
 """A namedtuple to represent and combine the two important attributes
@@ -18,7 +19,7 @@ class CreditCardTxnDC:
     """
 
     amountTuple: CurrencyAmountTuple
-    date: str
+    date: datetime
     vendor: str
     ccLastFourDigits: int = 0
 

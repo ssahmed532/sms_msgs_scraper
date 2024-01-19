@@ -1,6 +1,8 @@
 import re
 import xml.etree.ElementTree as ET
 
+from datetime import datetime
+
 from cc_txn import CreditCardTxnDC
 from cc_txn import CurrencyAmountTuple
 
@@ -16,6 +18,9 @@ class HBLSmsParser:
     HBL_CC_TXN_AMOUNT_RE = (
         r"(?P<currency>.*)-(?P<amount>\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b)"
     )
+    # The format of the transaction date in HBL CC txn SMS msgs:
+    #   19/Sep/2023
+    HBL_TXN_DATE_FMT = r"%d/%b/%Y"
 
     def __init__(self):
         self.xml_tree = None
@@ -38,12 +43,12 @@ class HBLSmsParser:
         return False
 
     @staticmethod
-    def _extractCurrencyAndAmount(str_value) -> CurrencyAmountTuple:
+    def _extractCurrencyAndAmount(strValue) -> CurrencyAmountTuple:
         currency = None
         amount = -1.2345
 
         pattern = re.compile(HBLSmsParser.HBL_CC_TXN_AMOUNT_RE)
-        m = pattern.match(str_value)
+        m = pattern.match(strValue)
         if m:
             # print(m.groupdict())
             # print(f'Parsed currency: [{m.group("currency").strip()}]')
@@ -61,39 +66,47 @@ class HBLSmsParser:
         return CurrencyAmountTuple(currency, amount)
 
     @staticmethod
+    def _convertToDateTime(strValue: str) -> datetime:
+        datetimeObj = None
+        try:
+            datetimeObj = datetime.strptime(strValue, HBLSmsParser.HBL_TXN_DATE_FMT)
+        except ValueError:
+            print(f"ERROR: unable to parse string into datetime: {strValue}")
+
+        return datetimeObj
+
+    @staticmethod
     def _extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC:
         ccTxn = None
-
-        ccLast4Digits = "N/A"
-        vendor = "N/A"
-        txnAmount = "N/A"
-        txnDate = "N/A"
 
         m = HBLSmsParser.HBL_CC_TXN_PTTRN.match(sms.attrib["body"])
         if m:
             assert len(m.groupdict()) == 4
             # print(m.groupdict())
 
-            # TODO:
-            # parse CC txn details into the correct types
-            # after the necessary validation.
+            ccLast4Digits = -1
 
             try:
-                str_value = m.group("last4digits").strip()
-                ccLast4Digits = int(str_value)
+                strValue = m.group("last4digits").strip()
+                ccLast4Digits = int(strValue)
             except ValueError:
-                ccLast4Digits = -1
+                ccLast4Digits = -9999
                 print(
-                    f"ERROR: unable to parse the last 4 digits of the CC for txn: {str_value}"
+                    f"ERROR: unable to parse the last 4 digits of the CC for txn: {strValue}"
                 )
 
-            amount_value = m.group("txnamount").strip()
-            currencyAndAmount = HBLSmsParser._extractCurrencyAndAmount(amount_value)
+            amountValue = m.group("txnamount").strip()
+            currencyAndAmount = HBLSmsParser._extractCurrencyAndAmount(amountValue)
             assert currencyAndAmount.currency and (currencyAndAmount.amount > 0)
+
+            datetimeObj = HBLSmsParser._convertToDateTime(
+                m.group("txndate").strip().rstrip(".")
+            )
+            assert datetimeObj
 
             ccTxn = CreditCardTxnDC(
                 amountTuple=currencyAndAmount,
-                date=m.group("txndate").strip(),
+                date=datetimeObj,
                 vendor=m.group("vendor").strip(),
                 ccLastFourDigits=ccLast4Digits,
             )
