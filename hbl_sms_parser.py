@@ -1,10 +1,8 @@
 import re
 import xml.etree.ElementTree as ET
-
 from datetime import datetime
 
-from cc_txn import CreditCardTxnDC
-from cc_txn import CurrencyAmountTuple
+from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 
 
 class HBLSmsParser:

@@ -1,7 +1,7 @@
+import sys
 from datetime import datetime, timedelta
 from enum import StrEnum
 from time import perf_counter
-import sys
 
 from cc_txn import CreditCardTxnDC
 from hbl_sms_parser import HBLSmsParser

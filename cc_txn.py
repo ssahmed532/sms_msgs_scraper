@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-
 """A namedtuple to represent and combine the two important attributes
 of a Credit Card transaction:
 
