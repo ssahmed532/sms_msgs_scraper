@@ -69,7 +69,9 @@ class HBLSmsParser:
     def _convertToDateTime(strValue: str) -> datetime:
         datetimeObj = None
         try:
-            datetimeObj = datetime.strptime(strValue, HBLSmsParser.HBL_TXN_DATE_FMT)
+            datetimeObj = datetime.strptime(
+                strValue, HBLSmsParser.HBL_TXN_DATE_FMT
+            ).astimezone(CreditCardTxnDC.DEFAULT_TZ)
         except ValueError:
             print(f"ERROR: unable to parse string into datetime: {strValue}")
 

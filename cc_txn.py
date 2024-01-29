@@ -1,6 +1,7 @@
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 """A namedtuple to represent and combine the two important attributes
@@ -16,6 +17,11 @@ CurrencyAmountTuple = namedtuple("CurrencyAmountTuple", ["currency", "amount"])
 class CreditCardTxnDC:
     """A DataClass representing a Credit Card transaction and
     its associated details.
+    """
+
+    DEFAULT_TZ = ZoneInfo("Asia/Karachi")
+    """
+    The default timezone used for the Txn date.
     """
 
     amountTuple: CurrencyAmountTuple
