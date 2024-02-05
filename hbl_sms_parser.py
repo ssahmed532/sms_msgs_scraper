@@ -115,32 +115,11 @@ class HBLSmsParser:
 
         return ccTxn
 
-    @staticmethod
-    def _printSmsBody(sms):
-        print(sms.attrib["body"])
-        print()
-
     def loadFromSmsBackupFile(self, backupFilepath):
         self.xml_tree = ET.parse(backupFilepath)
         self.xml_root = self.xml_tree.getroot()
         # print(type(self.xml_tree))
         # print(type(self.xml_root))
-
-    def printAllVendors(self):
-        print(f"Found {len(self.all_vendors)} unique Vendors from parsed SMS messages:")
-        print()
-
-        sorted_vendors = sorted(self.all_vendors)
-        for index, vendor in enumerate(sorted_vendors, start=1):
-            print(f"Vendor {index}: [{vendor}]")
-
-    def printCCTxns(self):
-        print(
-            f"Found {len(self.cc_txns)} HBL CC transactions from parsed SMS messages:"
-        )
-        print()
-        for index, txn in enumerate(self.cc_txns, start=1):
-            print(f"CC Txn {index}: {txn}")
 
     def parseMessages(self):
         """Parse all SMS messages from the XML tree and build an internal
