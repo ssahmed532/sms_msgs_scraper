@@ -1,30 +1,16 @@
-import sys
-from datetime import datetime, timedelta
-from enum import StrEnum
+import pprint
+from collections import defaultdict
 from pathlib import Path
+from pprint import PrettyPrinter
 from time import perf_counter
 
 import click
 
 from cc_txn import CreditCardTxnDC
+from common import Currency
 from hbl_sms_parser import HBLSmsParser
 
-
-class Command(StrEnum):
-    LIST_ALL_VENDORS = "--list-all-vendors"
-    PRINT_CC_TXNS = "--print-cc-txns"
-    SUM_ALL_CC_TXNS = "--sum-all-cc-txns"
-
-
-USAGE_MSG = "Usage: python hbl_sms_tool.py </path/to/SMS backup file.xml> [--list-all-vendors | --print-cc-txns | --sum-all-cc-txns]"
-
-ALL_COMMANDS = [cmd.value for cmd in Command]
-
 smsParser = None
-
-
-def sumAllTxns(smsParser: HBLSmsParser, month: str) -> None:
-    pass
 
 
 @click.group()
@@ -81,34 +67,52 @@ def list_all_cc_txns():
         click.echo(f"{index}: {txn}")
 
 
+#
+# monthlyTotals["2023_12"] -> {"PKR": 0.00, "CAD": 0.00, "USD": 0.00}
+#
+def _updateMonthlyTotals(txn: CreditCardTxnDC, monthlyTotals: dict) -> None:
+    monthKey = txn.date.strftime("%Y_%m")
+    currencyKey = txn.amountTuple.currency.lower()
+
+    if monthKey in monthlyTotals:
+        monthlyTotals[monthKey][currencyKey] += txn.amountTuple.amount
+    else:
+        monthlyTotals[monthKey] = {
+            Currency.CAD.value.lower(): 0.00,
+            Currency.PKR.value.lower(): 0.00,
+            Currency.USD.value.lower(): 0.00
+        }
+
+        monthlyTotals[monthKey][currencyKey] += txn.amountTuple.amount
+
+
 @cli.command()
-def sum_all_cc_txns():
-    # Make sure to install the tzdata package:
-    #   pip install tzdata
-    #
+def month_wise_cc_spending_summary():
+    txnsPerMonth = defaultdict(int)
+    monthlySpendingTotals = {}
 
     # TODO:
-    #   1) Make this dynamic ie detect the month for each txn automatically.
-    #   2) Sum & aggregate spend by different type of currency detected!
-    #   3) Parameterize this so that a year & month argument can be
+    #   1) Parameterize this so that a year & month argument can be
     #      passed in via the CLI (eg "March 2023"), and all the txns for
-    #      that month should be summed up.
-    dtMonthStart = datetime(2023, 11, 1, 0, 0, tzinfo=CreditCardTxnDC.DEFAULT_TZ)
-    dtMonthEnd = (
-        datetime(2023, 11, 30, 0, 0, tzinfo=CreditCardTxnDC.DEFAULT_TZ)
-        + timedelta(days=1)
-        - timedelta(seconds=1)
-    )
-    print(f"Month start: {dtMonthStart}")
-    print(f"Month end:   {dtMonthEnd}")
-    sumTotal = 0.00
+    #      that month only should be summed up.
     for txn in smsParser.cc_txns:
-        if txn.date >= dtMonthStart and txn.date <= dtMonthEnd:
-            print(txn)
-            sumTotal += txn.amountTuple.amount
+        # TODO: move the following line to a verbose-enabled check
+        print(f"Txn: {txn} => {txn.date.strftime("%Y_%m")}")
+        monthKey = txn.date.strftime("%Y_%m")
+        txnsPerMonth[monthKey] += 1
 
-    print(f"Sum total of all CC transactions for the month = {sumTotal}")
+        _updateMonthlyTotals(txn, monthlySpendingTotals)
+        print()
 
+    print()
+    print("Month-wise CC spending summary:")
+    pprint.pprint(monthlySpendingTotals, indent=2, width=20, compact=True)
+
+
+# TODO:
+#   - a command that shows a graphical distribution of # of CC txns by month
+#   - a command that shows all txns matching a specified vendor
+#   - a command that lists the sum (aggregate) total of spending for a specified category
 
 if __name__ == "__main__":
     cli()
