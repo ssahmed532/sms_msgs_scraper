@@ -8,7 +8,7 @@ import click
 
 from cc_txn import CreditCardTxnDC
 from common import Currency
-from hbl_sms_parser import HBLSmsParser
+from parser.hbl_sms_parser import HBLSmsParser
 
 smsParser = None
 
