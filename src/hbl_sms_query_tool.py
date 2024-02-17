@@ -1,5 +1,6 @@
 import pprint
 from collections import defaultdict
+from parser.hbl_sms_parser import HBLSmsParser
 from pathlib import Path
 from pprint import PrettyPrinter
 from time import perf_counter
@@ -8,13 +9,12 @@ import click
 
 from cc_txn import CreditCardTxnDC
 from common import Currency
-from parser.hbl_sms_parser import HBLSmsParser
 
 smsParser = None
 
 
 @click.group()
-@click.version_option("0.1.0", prog_name="hbl_sms_tool")
+@click.version_option("0.2.0", prog_name="hbl_sms_query_tool")
 @click.argument(
     "filepath",
     type=click.Path(
@@ -97,7 +97,7 @@ def month_wise_cc_spending_summary():
     #      that month only should be summed up.
     for txn in smsParser.cc_txns:
         # TODO: move the following line to a verbose-enabled check
-        print(f"Txn: {txn} => {txn.date.strftime("%Y_%m")}")
+        print(f"{txn} => {txn.date.strftime("%Y_%m")}")
         monthKey = txn.date.strftime("%Y_%m")
         txnsPerMonth[monthKey] += 1
 

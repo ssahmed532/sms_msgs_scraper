@@ -1,4 +1,5 @@
 import re
+import xml
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -8,8 +9,6 @@ from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 class HBLSmsParser:
     # SMS messages from these short codes will be assumed to be from HBL
     HBL_SHORT_CODES = ["4250"]
-
-    DEFAULT_CURRENCY = "PKR"
 
     HBL_CC_TXN_RE = r"Dear Customer, Your HBL CreditCard \(ending with (?P<last4digits>\d{4})\) has been charged at (?P<vendor>.*) for (?P<txnamount>.*) on (?P<txndate>.*)"
     HBL_CC_TXN_PTTRN = re.compile(HBL_CC_TXN_RE)
@@ -28,11 +27,11 @@ class HBLSmsParser:
         self.msgs_parsed = 0
 
     @staticmethod
-    def _isSmsFromHBL(sms):
+    def _isSmsFromHBL(sms: xml.etree.ElementTree.Element) -> bool:
         return sms.attrib["address"] in HBLSmsParser.HBL_SHORT_CODES
 
     @staticmethod
-    def _isMsgCreditCardTxn(sms):
+    def _isMsgCreditCardTxn(sms: xml.etree.ElementTree.Element) -> bool:
         msg_body = sms.attrib["body"]
 
         if ("CreditCard" in msg_body) and ("has been charged at" in msg_body):

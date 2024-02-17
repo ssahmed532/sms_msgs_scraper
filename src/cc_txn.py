@@ -18,6 +18,8 @@ class CreditCardTxnDC:
     its associated details.
     """
 
+    # TODO:
+    #   - this definition should move out to common.py
     DEFAULT_TZ = ZoneInfo("Asia/Karachi")
     """
     The default timezone used for the Txn date.
