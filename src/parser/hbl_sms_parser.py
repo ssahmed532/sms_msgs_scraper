@@ -7,7 +7,9 @@ from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 
 
 class HBLSmsParser:
-    # SMS messages from these short codes will be assumed to be from HBL
+    ID = "HBL"
+    # SMS messages from any one of these short codes will be assumed to
+    # be from HBL Bank
     HBL_SHORT_CODES = ["4250"]
 
     HBL_CC_TXN_RE = r"Dear Customer, Your HBL CreditCard \(ending with (?P<last4digits>\d{4})\) has been charged at (?P<vendor>.*) for (?P<txnamount>.*) on (?P<txndate>.*)"
@@ -27,11 +29,11 @@ class HBLSmsParser:
         self.msgs_parsed = 0
 
     @staticmethod
-    def _isSmsFromHBL(sms: xml.etree.ElementTree.Element) -> bool:
+    def isSmsFromHBL(sms: xml.etree.ElementTree.Element) -> bool:
         return sms.attrib["address"] in HBLSmsParser.HBL_SHORT_CODES
 
     @staticmethod
-    def _isMsgCreditCardTxn(sms: xml.etree.ElementTree.Element) -> bool:
+    def isMsgCreditCardTxn(sms: xml.etree.ElementTree.Element) -> bool:
         msg_body = sms.attrib["body"]
 
         if ("CreditCard" in msg_body) and ("has been charged at" in msg_body):
@@ -75,7 +77,7 @@ class HBLSmsParser:
         return datetimeObj
 
     @staticmethod
-    def _extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC:
+    def extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC:
         ccTxn = None
 
         m = HBLSmsParser.HBL_CC_TXN_PTTRN.match(sms.attrib["body"])

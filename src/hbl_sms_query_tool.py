@@ -1,6 +1,5 @@
 import pprint
 from collections import defaultdict
-from parser.hbl_sms_parser import HBLSmsParser
 from pathlib import Path
 from pprint import PrettyPrinter
 from time import perf_counter
@@ -9,7 +8,9 @@ import click
 
 from cc_txn import CreditCardTxnDC
 from common import Currency
+from sms_backup_file_parser import SmsBackupFileParser
 
+# the global instance of the SMS backup msgs file parser
 smsParser = None
 
 
@@ -30,7 +31,7 @@ def cli(filepath):
     global smsParser
 
     try:
-        smsParser = HBLSmsParser()
+        smsParser = SmsBackupFileParser()
         time_start = perf_counter()
         click.echo(f"Loading SMS msgs from backup file path: {filepath}")
         smsParser.loadFromSmsBackupFile(filepath)
@@ -48,10 +49,10 @@ def cli(filepath):
 def list_all_vendors():
     click.echo("Listing all vendors from CC transactions ...")
     click.echo(
-        f"Found {len(smsParser.all_vendors)} unique Vendors from parsed HBL SMS messages:"
+        f"Found {len(smsParser.ccVendors)} unique Vendors from parsed HBL SMS messages:"
     )
 
-    sorted_vendors = sorted(smsParser.all_vendors)
+    sorted_vendors = sorted(smsParser.ccVendors)
     for index, vendor in enumerate(sorted_vendors, start=1):
         click.echo(f"Vendor {index}: [{vendor}]")
 
@@ -60,10 +61,10 @@ def list_all_vendors():
 def list_all_cc_txns():
     click.echo("Listing all CC transactions ...")
     click.echo(
-        f"Found {len(smsParser.cc_txns)} HBL CC transactions from parsed HBL SMS messages:"
+        f"Found {len(smsParser.ccTxns)} HBL CC transactions from parsed HBL SMS messages:"
     )
     print()
-    for index, txn in enumerate(smsParser.cc_txns, start=1):
+    for index, txn in enumerate(smsParser.ccTxns, start=1):
         click.echo(f"{index}: {txn}")
 
 
@@ -87,7 +88,7 @@ def _updateMonthlyTotals(txn: CreditCardTxnDC, monthlyTotals: dict) -> None:
 
 
 @cli.command()
-def month_wise_cc_spending_summary():
+def monthly_cc_spending_summary():
     txnsPerMonth = defaultdict(int)
     monthlySpendingTotals = {}
 
@@ -95,7 +96,7 @@ def month_wise_cc_spending_summary():
     #   1) Parameterize this so that a year & month argument can be
     #      passed in via the CLI (eg "March 2023"), and all the txns for
     #      that month only should be summed up.
-    for txn in smsParser.cc_txns:
+    for txn in smsParser.ccTxns:
         # TODO: move the following line to a verbose-enabled check
         print(f"{txn} => {txn.date.strftime("%Y_%m")}")
         monthKey = txn.date.strftime("%Y_%m")
