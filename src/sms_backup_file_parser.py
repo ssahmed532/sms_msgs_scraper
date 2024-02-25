@@ -47,6 +47,14 @@ class SmsBackupFileParser:
                 # skip over MMS messages
                 continue
 
+            # TODO:
+            #   check for duplicate messages
+            #   if an SMS msg is detected as duplicate, skip/ignore it
+            #   e.g.
+            #       2 identical SMS messages from Faysal Bank on Saturday 02/24/2024 @ 5:56pm PKT
+            #       received 1 min apart!
+            #
+
             self.msgCounts["ALL"] += 1
 
             if HBLSmsParser.isSmsFromHBL(child):
