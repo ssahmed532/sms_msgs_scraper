@@ -1,3 +1,5 @@
+import hashlib
+import xml
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from parser.hbl_sms_parser import HBLSmsParser
@@ -17,6 +19,31 @@ class SmsBackupFileParser:
     # Meezan Bank
     MEZN_SHORT_CODES = ["8079", "9779"]
 
+    @staticmethod
+    def calcSmsMsgHash(sms: xml.etree.ElementTree.Element) -> str:
+        """Calculate a cryptographic hash for an SMS msg
+
+        Args:
+            sms (xml.etree.ElementTree.Element): the SMS msg
+
+        Returns:
+            str: the cryptographic hash of the SMS msg in hex format
+        """
+        # to be completely correct, the hash of a msg *SHOULD* include:
+        #   - the sender short code
+        #   - the contents of the msg (body)
+        #   - the date/timestamp it was received (or sent!)
+        msgBody = sms.attrib["body"].strip()
+        sha256Hash = hashlib.sha3_512(msgBody.encode("utf-8")).hexdigest()
+        return sha256Hash
+
+    def printSmsMsg(sms: xml.etree.ElementTree.Element) -> None:
+        strValue = ET.tostring(sms, encoding="utf-8").decode("utf-8")
+        print(strValue)
+
+    def smsMsgToString(sms: xml.etree.ElementTree.Element) -> str:
+        return ET.tostring(sms, encoding="utf-8").decode("utf-8")
+
     def __init__(self):
         self.xmlTree = None
         self.xmlRoot = None
@@ -25,13 +52,35 @@ class SmsBackupFileParser:
         self.expectedMsgs = 0
         self.msgsParsed = 0
         self.msgCounts = defaultdict(int)
+        # dict to keep track of duplicate SMS Msgs:
+        #   hash -> msg body/content
+        self.msgHashes = {}
         self.hblParser = HBLSmsParser()
 
-    def loadFromSmsBackupFile(self, filepath):
+    def loadFromSmsBackupFile(self, filepath: str):
         self.xmlTree = ET.parse(filepath)
         self.xmlRoot = self.xmlTree.getroot()
         self.expectedMsgs = int(self.xmlRoot.attrib["count"])
         assert self.expectedMsgs > 0
+
+    def _isSmsDuplicate(self, sms: xml.etree.ElementTree.Element) -> bool:
+        duplicate = False
+        hash = SmsBackupFileParser.calcSmsMsgHash(sms)
+
+        duplicate = hash in self.msgHashes
+
+        if not duplicate:
+            self.msgHashes[hash] = sms.attrib["body"]
+
+        if duplicate:
+            print("Original msg body:")
+            print(f"\t{self.msgHashes[hash]}")
+            print("Duplicate msg:")
+            print(f"\tsender={sms.attrib["address"]}, {sms.attrib["body"]}")
+            print()
+            print()
+
+        return duplicate
 
     def parseMessages(self):
         """Parse all SMS messages from the XML tree and build an internal
@@ -57,7 +106,7 @@ class SmsBackupFileParser:
 
             self.msgCounts["ALL"] += 1
 
-            if HBLSmsParser.isSmsFromHBL(child):
+            if HBLSmsParser.isSmsFromHBL(child) and (not self._isSmsDuplicate(child)):
                 self.msgCounts[HBLSmsParser.ID] += 1
 
                 if HBLSmsParser.isMsgCreditCardTxn(child):
@@ -71,11 +120,11 @@ class SmsBackupFileParser:
 
                     self.ccVendors.add(ccTxn.vendor)
                     self.ccTxns.append(ccTxn)
-            elif child.attrib["address"] in self.FBL_SHORT_CODES:
+            elif (child.attrib["address"] in self.FBL_SHORT_CODES) and (not self._isSmsDuplicate(child)):
                 self.msgCounts["FBL"] += 1
-            elif child.attrib["address"] in self.SCB_SHORT_CODES:
+            elif (child.attrib["address"] in self.SCB_SHORT_CODES) and (not self._isSmsDuplicate(child)):
                 self.msgCounts["SCB"] += 1
-            elif child.attrib["address"] in self.MEZN_SHORT_CODES:
+            elif (child.attrib["address"] in self.MEZN_SHORT_CODES) and (not self._isSmsDuplicate(child)):
                 self.msgCounts["MEZN"] += 1
             else:
                 self.msgCounts["OTHER"] += 1
@@ -92,8 +141,10 @@ class SmsBackupFileParser:
 
 
 if __name__ == "__main__":
-    SMS_BACKUP_FILE_PATH = r"D:\TBD\sms-20231223185422.xml"
+    SMS_BACKUP_FILE_PATH1 = r"D:\TBD\sms-20231223185422.xml"
+    SMS_BACKUP_FILE_PATH2 = r"D:\TBD\sms-20240107104401.xml"
+    SMS_BACKUP_FILE_PATH3 = r"D:\TBD\sms-20240301215312.xml"
     parser = SmsBackupFileParser()
 
-    parser.loadFromSmsBackupFile(SMS_BACKUP_FILE_PATH)
+    parser.loadFromSmsBackupFile(SMS_BACKUP_FILE_PATH3)
     msgsCount = parser.parseMessages()
