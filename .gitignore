@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Environments
+.venv/
+
+# uv
+# uv.lock IS committed — it is the reproducibility guarantee.
+.uv-cache/
+
+# Local data — SMS backups contain personal financial data, never commit them
+*.xml

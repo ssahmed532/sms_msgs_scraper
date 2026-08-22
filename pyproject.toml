@@ -1,0 +1,18 @@
+[project]
+name = "sms-msgs-scraper"
+version = "0.2.0"
+description = "Parse and analyze credit card transaction SMS messages from Pakistani banks"
+requires-python = ">=3.14"
+dependencies = [
+    "click==8.4.2",
+    # Windows ships no system IANA tz database and uv-managed interpreters
+    # bundle none, so the module-scope ZoneInfo("Asia/Karachi") calls in
+    # common.py / cc_txn.py raise ZoneInfoNotFoundError without this.
+    # Bump periodically — this is the tz rule database, not just a library.
+    "tzdata==2026.3",
+]
+
+# There is no importable package here — src/ is a flat script directory and
+# imports resolve because Python puts the script's own directory on sys.path.
+[tool.uv]
+package = false
