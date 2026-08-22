@@ -9,8 +9,11 @@ from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 class HBLSmsParser:
     ID = "HBL"
     # SMS messages from any one of these short codes will be assumed to
-    # be from HBL Bank
-    HBL_SHORT_CODES = ["4250"]
+    # be from HBL Bank.
+    # HBL migrated CC txn alerts from 4250 to 14250 in mid-Jan 2025 (last 4250
+    # alert 15/Jan/2025, first 14250 alert 18/Jan/2025). The msg body format is
+    # unchanged, so both codes must stay listed to cover the full history.
+    HBL_SHORT_CODES = ["4250", "14250"]
 
     HBL_CC_TXN_RE = r"Dear Customer, Your HBL CreditCard \(ending with (?P<last4digits>\d{4})\) has been charged at (?P<vendor>.*) for (?P<txnamount>.*) on (?P<txndate>.*)"
     HBL_CC_TXN_PTTRN = re.compile(HBL_CC_TXN_RE)
@@ -68,9 +71,14 @@ class HBLSmsParser:
     def _convertToDateTime(strValue: str) -> datetime:
         datetimeObj = None
         try:
+            # All timestamps in an SMS backup file are Karachi local time, so
+            # the parsed value is *stamped* with that zone, not converted into
+            # it. astimezone() would instead read the naive value as the host
+            # machine's local time and shift it — wrong on any machine not set
+            # to +05:00, and enough to move a txn across a day boundary.
             datetimeObj = datetime.strptime(
                 strValue, HBLSmsParser.HBL_TXN_DATE_FMT
-            ).astimezone(CreditCardTxnDC.DEFAULT_TZ)
+            ).replace(tzinfo=CreditCardTxnDC.DEFAULT_TZ)
         except ValueError:
             print(f"ERROR: unable to parse string into datetime: {strValue}")
 
