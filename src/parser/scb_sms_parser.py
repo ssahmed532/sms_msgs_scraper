@@ -24,8 +24,19 @@ class SCBSmsParser:
 
     # The card is masked as either the full "5452xxxxxxxx1280" form (BIN + last
     # 4 digits) or a BIN-only "5495" form that carries no last-4 at all. Those
-    # two shapes are exhaustive over the validated corpus.
-    SCB_CARD_MASK_PTTRN = re.compile(r"\d{4}x+(\d{4})")
+    # two shapes are exhaustive over the validated corpus, but the txn regex
+    # accepts any run of digits and x's, so a third shape can appear without
+    # warning the day SCB changes its masking.
+    #
+    # The last-4 pattern therefore does not hard-code the 4-digit BIN: any mask
+    # whose digits are interrupted by a masked section ends with its real last 4
+    # (a 6-digit BIN, "545221xxxxxx1280", is the industry-standard next step and
+    # would otherwise have been recorded as card 0 while the digits sat in the
+    # msg). The BIN-only pattern matches an unmasked run of digits, which
+    # genuinely carries no last-4. A mask matching neither is warned about
+    # rather than silently reported as 0.
+    SCB_CARD_MASK_PTTRN = re.compile(r"\d*x+(\d{4})")
+    SCB_CARD_BIN_ONLY_PTTRN = re.compile(r"\d+")
 
     # The format of the transaction date in SCB CC txn SMS msgs:
     #   29-09-23
@@ -79,12 +90,24 @@ class SCBSmsParser:
     def _extractCardLastFourDigits(cardMask: str) -> int:
         """Pull the last 4 card digits out of the msg's card mask.
 
-        Returns 0 for the BIN-only mask form ("5495"), which carries no last-4
-        digits at all.
+        Returns 0 when the mask carries no last-4 digits at all — the BIN-only
+        form ("5495") — and also, with a warning, for a mask shape that is
+        neither form. The warning matters: returning a bare 0 for an
+        unrecognized shape is indistinguishable from a legitimate BIN-only mask,
+        so a masking change at the bank would quietly strip the card digits off
+        every SCB txn.
         """
-        m = SCBSmsParser.SCB_CARD_MASK_PTTRN.fullmatch(cardMask.strip())
+        mask = cardMask.strip()
+
+        m = SCBSmsParser.SCB_CARD_MASK_PTTRN.fullmatch(mask)
         if m:
             return int(m.group(1))
+
+        if not SCBSmsParser.SCB_CARD_BIN_ONLY_PTTRN.fullmatch(mask):
+            print(
+                "WARNING: unrecognized SCB card mask shape; recording the txn "
+                "with no card digits"
+            )
 
         return 0
 

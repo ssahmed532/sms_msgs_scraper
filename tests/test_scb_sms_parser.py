@@ -1,6 +1,8 @@
+import io
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from parser.hbl_sms_parser import HBLSmsParser
 from parser.scb_sms_parser import SCBSmsParser
@@ -215,6 +217,49 @@ class TestSCBSmsParser(unittest.TestCase):
 
                 self.assertIsNotNone(ccTxn)
                 self.assertEqual(ccTxn.ccLastFourDigits, 0)
+
+    def test_extractDetailsFromTxnMsg_longer_bin_card_mask(self):
+        """Test method to verify that the last 4 digits are recovered from a
+        mask whose BIN is not 4 digits long.
+
+        The txn regex accepts any run of digits and x's, so this shape is
+        accepted as a txn. It used to be recorded with card 0 while the digits
+        sat right there in the msg — and indistinguishably from the legitimate
+        BIN-only shape. A 6-digit BIN is the industry-standard next step, so
+        this is the shape most likely to actually turn up.
+        """
+        for cardMask, expected in [
+            ("545221xxxxxx1280", 1280),
+            ("54522123xxxx4321", 4321),
+            ("xxxxxxxxxxxx9999", 9999),
+        ]:
+            with self.subTest(cardMask=cardMask):
+                ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
+                    self._createScbTxnSms(cardMask=cardMask)
+                )
+
+                self.assertIsNotNone(ccTxn)
+                self.assertEqual(ccTxn.ccLastFourDigits, expected)
+
+    def test_extractCardLastFourDigits_warns_on_unknown_mask_shape(self):
+        """Test method to verify that a mask shape which is neither form is
+        warned about rather than silently reported as 0.
+
+        Returning a bare 0 is indistinguishable from a legitimate BIN-only mask,
+        so without the warning a masking change at the bank would quietly strip
+        the card digits off every SCB txn.
+        """
+        with redirect_stdout(io.StringIO()) as captured:
+            # a masked section not followed by exactly 4 trailing digits
+            self.assertEqual(SCBSmsParser._extractCardLastFourDigits("5452xxxx12"), 0)
+        self.assertIn("WARNING", captured.getvalue())
+
+        # ...while both real shapes stay silent
+        for cardMask in ("5452xxxxxxxx1280", "5495"):
+            with self.subTest(cardMask=cardMask):
+                with redirect_stdout(io.StringIO()) as captured:
+                    SCBSmsParser._extractCardLastFourDigits(cardMask)
+                self.assertEqual(captured.getvalue(), "")
 
     def test_extractDetailsFromTxnMsg_stamps_karachi_tz(self):
         """Test method to verify that the txn date is *stamped* as Karachi
