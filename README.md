@@ -130,8 +130,9 @@ It ends in `RESULT: PASS` or `RESULT: FAIL` with the offending metric's expected
 counts only — never message contents — because a backup is personal financial data.
 
 If an expected count misses, fix the code, or re-derive the expectation from the corpus and record
-that derivation in `MULTI_BANK_PARSERS_PLAN.md`. Never edit a number in the script to match what the
-code printed: that turns the one check that would have caught a regression into a rubber stamp.
+that derivation in the **Reference numbers** table in `CLAUDE.md`. Never edit a number in the script
+to match what the code printed: that turns the one check that would have caught a regression into a
+rubber stamp.
 
 ### Further reading
 

@@ -33,10 +33,10 @@ financial data, and this output is the kind of thing that ends up pasted into a
 bug report.
 
 **Anti-drift rule.** If an expected count misses, the fix belongs in the code —
-or in a re-derivation of the expectation from the corpus, recorded in
-`MULTI_BANK_PARSERS_PLAN.md` with the derivation that produced it. Never edit a
-number here to match what the code happened to print; that turns the one check
-that would have caught a regression into a rubber stamp.
+or in a re-derivation of the expectation from the corpus, recorded in the
+**Reference numbers** table in `CLAUDE.md` with the derivation that produced it.
+Never edit a number here to match what the code happened to print; that turns
+the one check that would have caught a regression into a rubber stamp.
 """
 
 import hashlib
@@ -256,8 +256,8 @@ def main(argv: list) -> int:
             print(f"{name:<26}{str(metrics.get(name)):>10}")
         print()
         print("These are this backup's numbers, not a pass/fail. To gate on them,")
-        print("record the derivation in MULTI_BANK_PARSERS_PLAN.md and update both")
-        print("EXPECTED and REFERENCE_BACKUP_SHA256 in this file.")
+        print("record the derivation in CLAUDE.md's Reference numbers table, then")
+        print("update both EXPECTED and REFERENCE_BACKUP_SHA256 in this file.")
 
     invariantFailures = checkInvariants(smsParser, metrics)
     failures.extend(invariantFailures)

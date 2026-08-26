@@ -112,6 +112,11 @@ sms_msgs_scraper/
 ├── uv.lock                       # committed — the reproducibility guarantee
 ├── .python-version               # 3.14
 ├── .gitignore                    # ignores .venv/, __pycache__/, *.xml (SMS backups are personal data)
+├── docs/
+│   └── archive/                  # finished + shelved plans, kept as a record; NOT current guidance
+│       ├── IMPLEMENTATION_PLAN.md      # shelved uv/packaging rewrite
+│       ├── MULTI_BANK_PARSERS_PLAN.md  # the plan that shipped as v1.0.0
+│       └── PROPOSED_REDESIGN.md        # shelved sms-txn-analyzer redesign
 ├── src/
 │   ├── sms_txn_query_tool.py    # CLI entry point (Click-based)
 │   ├── sms_backup_file_parser.py # Root-level orchestrator
