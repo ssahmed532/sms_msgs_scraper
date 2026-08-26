@@ -1,5 +1,22 @@
 # Implementation Plan: Faysal Bank CC, Standard Chartered CC, and Meezan Bank Debit Parsers (Multi-Agent)
 
+> ## ⚠ ARCHIVED — this plan was executed and shipped
+>
+> **Archived 2026-08-26.** It was built as specified and released as **v1.0.0** (merged in `2bd9f87`):
+> all four banks parse, FBL/SCB/HBL credit cards share `ccTxns`, Meezan debits live in `debitTxns`,
+> and the suite stands at 120 tests. Kept as the record of how that work was planned and validated —
+> **not as a backlog.** Nothing here is still to do.
+>
+> The "not yet executed" status line below is the 2026-08-23 state, left as written.
+>
+> **For the code as it stands, read these instead:** `CLAUDE.md` for the architecture, the message
+> formats, the reference transaction counts and the accepted limitations; `src/IMPROVEMENTS.md` for
+> the open defects; `README.md` for usage.
+>
+> **Re-derived expectation counts no longer go here.** This doc holds the original 2026-08-26
+> derivations, and `scripts/verify_against_backup.py` used to point at it. A new derivation belongs in
+> CLAUDE.md's **Reference numbers** table, which is the live table the harness gates against.
+
 > Status: **approved design, not yet executed** (planned 2026-08-23, validated against `sms-20251011130814.xml`;
 > **re-audited and amended 2026-08-26** — every regex and count re-validated against the same backup, expected
 > numbers corrected to post-dedup runtime values, the Phase A/B sequencing flaw fixed, the MEZN txn-signal made

@@ -1,5 +1,21 @@
 # Proposed Redesign: SMS Transaction Analyzer
 
+> ## ⚠ ARCHIVED — shelved rationale, superseded before it was ever built
+>
+> **Archived 2026-08-26.** This is the *rationale* document for the `sms-txn-analyzer` rewrite. It was
+> superseded by `IMPLEMENTATION_PLAN.md` (which resolved 16 contradictions found in here), and that
+> plan was then shelved too: on **2026-08-08** the user chose a minimal in-place uv setup instead.
+> None of the architecture proposed below — the package layout, pydantic models, SQLite store,
+> spending categorizer, `sms-txn-analyzer` CLI verbs — exists in the code.
+>
+> **Do not implement from this document directly**, even if the rewrite is revived; it is the older
+> and less consistent of the two. Its lasting value is the critique of the original single-bank
+> design, which is what motivated both the multi-bank parsers and the rename of the entry point away
+> from `hbl_sms_query_tool.py`. Both of those shipped — by the incremental route, not this one.
+>
+> **For the code as it stands, read these instead:** `CLAUDE.md` for the architecture and
+> limitations, `src/IMPROVEMENTS.md` for the open defects, `README.md` for usage.
+
 A comprehensive proposal to revamp the SMS Messages Scraper into a well-architected, extensible, and testable Python CLI application.
 
 ---

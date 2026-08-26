@@ -1,5 +1,25 @@
 # Implementation Plan: `sms-txn-analyzer`
 
+> ## ⚠ ARCHIVED — shelved, never implemented
+>
+> **Archived 2026-08-26.** On **2026-08-08** the user chose a minimal in-place uv setup over this
+> full structural rewrite, and that is what the repo has: a flat `src/` script directory, no
+> installable package, no pydantic, no SQLite store, no categorizer. This plan's distribution name
+> (`sms-txn-analyzer`), package layout (`src/sms_txn_analyzer/`), CLI shape and test suite were
+> **never built.** Kept because its validation record and its dependency/tooling decisions were
+> earned by actually running them (see the "Validation record" below), and would still apply if the
+> rewrite is ever revived.
+>
+> **Do not start executing this.** The "ready to implement" status line below is the 2026-07-31
+> state, left as written.
+>
+> **For the code as it stands, read these instead:** `CLAUDE.md` for the architecture and
+> conventions, `src/IMPROVEMENTS.md` for the open defects, `README.md` for usage.
+>
+> Two things in here did land, via the minimal path: the uv migration itself (`pyproject.toml` +
+> committed `uv.lock`, `[tool.uv] package = false`) and the `tzdata` pin that Windows needs for
+> `ZoneInfo("Asia/Karachi")`.
+
 **Single-pass rewrite of `sms_msgs_scraper` into a uv-managed, packaged, testable Python CLI.**
 
 Status: ready to implement. Written 2026-07-31.
