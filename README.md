@@ -26,7 +26,7 @@ Dependencies are managed with [uv](https://docs.astral.sh/uv/); `uv run` creates
 environment on first use, so there is nothing to install by hand.
 
 ```bash
-uv run src/hbl_sms_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
+uv run src/sms_txn_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
 ```
 
 ### Credit card commands
@@ -59,14 +59,14 @@ The three credit card commands also accept `--bank {HBL|FBL|SCB}` (case-insensit
 
 ```bash
 # every CC transaction in 2024, across all three CC banks
-uv run src/hbl_sms_query_tool.py backup.xml list_all_cc_txns \
+uv run src/sms_txn_query_tool.py backup.xml list_all_cc_txns \
     --from-date 2024-01-01 --to-date 2024-12-31
 
 # just Faysal Bank, month by month
-uv run src/hbl_sms_query_tool.py backup.xml monthly_cc_spending_summary --bank FBL
+uv run src/sms_txn_query_tool.py backup.xml monthly_cc_spending_summary --bank FBL
 
 # every ATM withdrawal since the start of 2025
-uv run src/hbl_sms_query_tool.py backup.xml list_all_debit_txns \
+uv run src/sms_txn_query_tool.py backup.xml list_all_debit_txns \
     --txn-type atm_withdrawal --from-date 2025-01-01
 ```
 

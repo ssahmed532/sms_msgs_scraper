@@ -14,7 +14,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 1.0.0 — declared in **two** places that must agree: `@click.version_option` in `hbl_sms_query_tool.py` and `[project].version` in `pyproject.toml` (which `uv.lock` also carries). A test pins them equal, because they had already drifted apart once.
+**Version:** 1.0.0 — declared in **two** places that must agree: `@click.version_option` in `sms_txn_query_tool.py` and `[project].version` in `pyproject.toml` (which `uv.lock` also carries). A test pins them equal, because they had already drifted apart once.
 
 ## Development Commands
 
@@ -35,7 +35,7 @@ uv run python -m unittest discover -s ../tests/ -p "test_hbl_sms_parser.py" -v
 ### Running the CLI Tool
 ```bash
 # from the repo root
-uv run src/hbl_sms_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
+uv run src/sms_txn_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
 
 # Credit card commands (HBL + FBL + SCB combined):
 #   list_all_vendors               - Unique vendors from CC transactions (sorted alphabetically)
@@ -57,10 +57,10 @@ uv run src/hbl_sms_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
 ```
 ```bash
-uv run src/hbl_sms_query_tool.py backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024-12-31
-uv run src/hbl_sms_query_tool.py backup.xml monthly_cc_spending_summary --from-date 2025-01-01
-uv run src/hbl_sms_query_tool.py backup.xml list_all_cc_txns --bank FBL
-uv run src/hbl_sms_query_tool.py backup.xml list_all_debit_txns --txn-type atm_withdrawal
+uv run src/sms_txn_query_tool.py backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024-12-31
+uv run src/sms_txn_query_tool.py backup.xml monthly_cc_spending_summary --from-date 2025-01-01
+uv run src/sms_txn_query_tool.py backup.xml list_all_cc_txns --bank FBL
+uv run src/sms_txn_query_tool.py backup.xml list_all_debit_txns --txn-type atm_withdrawal
 ```
 
 ### Verifying against a real backup
@@ -113,7 +113,7 @@ sms_msgs_scraper/
 ├── .python-version               # 3.14
 ├── .gitignore                    # ignores .venv/, __pycache__/, *.xml (SMS backups are personal data)
 ├── src/
-│   ├── hbl_sms_query_tool.py    # CLI entry point (Click-based)
+│   ├── sms_txn_query_tool.py    # CLI entry point (Click-based)
 │   ├── sms_backup_file_parser.py # Root-level orchestrator
 │   ├── cc_txn.py                 # CC txn data model (CreditCardTxnDC dataclass)
 │   ├── debit_txn.py              # Account debit data model (DebitTxnDC, DebitTxnType)
@@ -147,7 +147,7 @@ because that is where the executed script lives.
 
 ### Module Relationships
 ```
-hbl_sms_query_tool.py (CLI entry point via Click)
+sms_txn_query_tool.py (CLI entry point via Click)
     ├── common.py (Currency enum)
     ├── cc_txn.py (CreditCardTxnDC dataclass)
     ├── debit_txn.py (DebitTxnDC, DebitTxnType)
@@ -161,7 +161,7 @@ hbl_sms_query_tool.py (CLI entry point via Click)
 
 ### Key Components
 
-**`hbl_sms_query_tool.py`** — Click CLI entry point. Defines a `@click.group()` with a required `filepath` argument and five subcommands (three CC, two debit). Uses a **global** `smsParser` variable shared between the group callback and subcommands. Measures parse time with `perf_counter`. Only catches `PermissionError` from file loading.
+**`sms_txn_query_tool.py`** — Click CLI entry point. Defines a `@click.group()` with a required `filepath` argument and five subcommands (three CC, two debit). Uses a **global** `smsParser` variable shared between the group callback and subcommands. Measures parse time with `perf_counter`. Only catches `PermissionError` from file loading.
 
 **`SmsBackupFileParser`** (`sms_backup_file_parser.py`) — Orchestrator class. Loads the entire XML
 tree via `ET.parse()`, iterates `<sms>` elements, skips `<mms>` elements, then for each msg:
@@ -313,7 +313,7 @@ Example: `"Dear Customer, Your HBL CreditCard (ending with 8526) has been charge
   as the *host machine's* local time and shifts it, which silently moves txns across day boundaries
   on any machine not set to +05:00. Never use `astimezone()` on a value parsed from a backup.
 - **Tests must run from `src/`** — imports are relative to that directory (no package setup). The CLI
-  itself can be launched from anywhere via `uv run src/hbl_sms_query_tool.py`.
+  itself can be launched from anywhere via `uv run src/sms_txn_query_tool.py`.
 - **Subcommands are registered with an explicit name string** — `@cli.command("list_all_vendors")`.
   Click ≥8.2 derives command names by replacing underscores with dashes, so without the explicit
   name the documented `list_all_vendors` invocation silently becomes `list-all-vendors`.
@@ -373,7 +373,7 @@ Documented in detail in `src/IMPROVEMENTS.md`. Key items:
 - **Duplicate `DEFAULT_TZ`** definition in both `common.py` and `cc_txn.py`. The three newer parsers import it from `common.py`; HBL still uses `CreditCardTxnDC.DEFAULT_TZ`.
 - **`SpendingCategories` enum** defined but unused anywhere
 - **Global mutable state** (`smsParser`) in CLI module instead of using Click context
-- **Unused import** `PrettyPrinter` in `hbl_sms_query_tool.py`
+- **Unused import** `PrettyPrinter` in `sms_txn_query_tool.py`
 - **HBL amount regex requires comma-grouped thousands** — `PKR-25170.49` (no comma, >= 1,000) fails to parse, returns the `(None, -1.2345)` sentinel, and the `assert` in `extractDetailsFromTxnMsg` then aborts the whole run. Pinned by `test_extractCurrencyAndAmount_ungrouped_thousands`. The newer parsers return `None` and skip instead of asserting.
 - **HBL is the only bank that asserts** on extraction results, so one malformed HBL txn msg aborts the entire run. The other three skip + warn + count.
 - **Remaining test gaps** — CLI subcommand output/end-to-end runs (`CliRunner` invocations). Parser methods, `SmsBackupFileParser` (dedup, routing, conservation, mixed-bank), command registration, option wiring, the bank filter and monthly-total seeding are all covered.

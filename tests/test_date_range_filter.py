@@ -6,7 +6,7 @@ import click
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
 from debit_txn import DebitTxnDC, DebitTxnType
-from hbl_sms_query_tool import _dateRangeLabel, _filterTxnsByDateRange
+from sms_txn_query_tool import _dateRangeLabel, _filterTxnsByDateRange
 
 
 class TestDateRangeFilter(unittest.TestCase):

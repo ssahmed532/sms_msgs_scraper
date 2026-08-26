@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
-from hbl_sms_query_tool import _filterTxnsByBank, _updateMonthlyTotals, cli
+from sms_txn_query_tool import _filterTxnsByBank, _updateMonthlyTotals, cli
 
 
 class TestCliCommandRegistration(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestCliCommandRegistration(unittest.TestCase):
     def test_cli_version_matches_project_metadata(self):
         """Test method to verify that --version and the packaging metadata
         report the same version. They are declared in two different files
-        (@click.version_option in hbl_sms_query_tool.py, and [project].version
+        (@click.version_option in sms_txn_query_tool.py, and [project].version
         in pyproject.toml) with nothing tying them together, so they drift
         apart silently — and then a release identifies itself differently
         depending on who is asking.

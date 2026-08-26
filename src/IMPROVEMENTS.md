@@ -393,7 +393,7 @@ if not ccTxn.amountTuple.currency:
 
 ### 3c. Global mutable state
 
-**File:** `hbl_sms_query_tool.py:14`
+**File:** `sms_txn_query_tool.py:14`
 **Severity:** Medium
 
 `smsParser = None` at module level, mutated via `global smsParser` inside `cli()`. This
@@ -432,7 +432,7 @@ def list_all_vendors(ctx):
 
 ### 3d. Unused import
 
-**File:** `hbl_sms_query_tool.py:4`
+**File:** `sms_txn_query_tool.py:4`
 **Severity:** Low
 
 `from pprint import PrettyPrinter` is imported but never used. Only `pprint.pprint` (from
@@ -515,7 +515,7 @@ duplicate = msg_hash in self.msgHashes
 
 ### 4a. Mixed `click.echo()` and `print()`
 
-**File:** `hbl_sms_query_tool.py`
+**File:** `sms_txn_query_tool.py`
 **Severity:** Low
 
 The file uses both `click.echo()` (lines 36, 50–57, 62–68) and bare `print()` (lines 40–41,
@@ -602,7 +602,7 @@ if not address:
 
 ### 5b. `_updateMonthlyTotals` doesn't leverage `defaultdict` — **RESOLVED (1.0.0)**
 
-**File:** `hbl_sms_query_tool.py:74-87`
+**File:** `sms_txn_query_tool.py:74-87`
 **Severity:** Low
 
 > **Resolved**, though deliberately not with `defaultdict`. The month dict is created first, then a
@@ -649,7 +649,7 @@ def _updateMonthlyTotals(txn, monthlyTotals):
 
 ### 5c. Narrow exception handling in CLI entry point
 
-**File:** `hbl_sms_query_tool.py:42-45`
+**File:** `sms_txn_query_tool.py:42-45`
 **Severity:** Medium
 
 The `try/except` in `cli()` only catches `PermissionError`. Other likely exceptions go
@@ -751,18 +751,18 @@ No tests exist for:
 | 2e  | Py 3.12-14  | `cc_txn.py:33`                   | Low        |
 | 3a  | Bug         | `sms_backup_file_parser.py:40`   | **High**   |
 | 3b  | Correctness | multiple                         | Medium     |
-| 3c  | Design      | `hbl_sms_query_tool.py:14`       | Medium     |
-| 3d  | Cleanup     | `hbl_sms_query_tool.py:4`        | Low        |
+| 3c  | Design      | `sms_txn_query_tool.py:14`       | Medium     |
+| 3d  | Cleanup     | `sms_txn_query_tool.py:4`        | Low        |
 | 3e  | Cleanup     | `common.py` / `cc_txn.py`        | Low        |
 | 3f  | Cleanup     | `common.py:18`                   | Low        |
 | 3g  | Cleanup     | `hbl_sms_parser.py:119`          | Medium     |
 | 3h  | Cleanup     | `sms_backup_file_parser.py:68`   | Low        |
-| 4a  | Consistency | `hbl_sms_query_tool.py`          | Low        |
+| 4a  | Consistency | `sms_txn_query_tool.py`          | Low        |
 | 4b  | Consistency | `hbl_sms_parser.py`              | Low        |
 | 4c  | Design      | all files                        | Medium     |
 | 5a  | Robustness  | `sms_backup_file_parser.py`      | Medium     |
-| 5b  | Efficiency  | `hbl_sms_query_tool.py:74`       | Low        |
-| 5c  | Robustness  | `hbl_sms_query_tool.py:42`       | Medium     |
+| 5b  | Efficiency  | `sms_txn_query_tool.py:74`       | Low        |
+| 5c  | Robustness  | `sms_txn_query_tool.py:42`       | Medium     |
 | 6a  | Testing     | `tests/`                         | **High**   |
 | 6b  | Testing     | `tests/`                         | **High**   |
 | 6c  | Testing     | `tests/`                         | Medium     |
