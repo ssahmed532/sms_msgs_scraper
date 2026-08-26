@@ -55,6 +55,25 @@ The three credit card commands also accept `--bank {HBL|FBL|SCB}` (case-insensit
 `list_all_debit_txns` accepts
 `--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}`.
 
+The two monthly summary commands accept `--verbose` / `-v`, which also lists the transactions the
+summary was built from.
+
+### Output
+
+Everything is rendered with [Rich](https://rich.readthedocs.io/): transactions and vendors come out
+as tables, spending summaries as a month-by-month table with a grand total footer, and the colour
+tells you what you are looking at — each bank, each currency and each debit type has its own.
+`--help` is rendered too, with the commands grouped into credit card and account debit panels.
+
+Colour is dropped automatically when the output is piped or redirected, or when `NO_COLOR` is set in
+the environment. To force it off in a terminal, pass `--no-color` **before** the backup file path —
+a Click group stops parsing its own options at the first positional argument, so the flag has to
+come first:
+
+```bash
+uv run src/sms_txn_query_tool.py --no-color backup.xml list_all_cc_txns
+```
+
 ### Examples
 
 ```bash
@@ -68,6 +87,9 @@ uv run src/sms_txn_query_tool.py backup.xml monthly_cc_spending_summary --bank F
 # every ATM withdrawal since the start of 2025
 uv run src/sms_txn_query_tool.py backup.xml list_all_debit_txns \
     --txn-type atm_withdrawal --from-date 2025-01-01
+
+# the monthly debit summary, with the transactions behind it
+uv run src/sms_txn_query_tool.py backup.xml monthly_debit_spending_summary --verbose
 ```
 
 ## Notes

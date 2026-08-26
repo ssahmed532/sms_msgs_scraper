@@ -5,6 +5,7 @@ from datetime import datetime
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
+from console_ui import printWarning
 
 
 class FBLSmsParser:
@@ -58,7 +59,7 @@ class FBLSmsParser:
         Deliberately no msg body: the backup is personal financial data, and the
         received timestamp is enough to locate the offending msg in it.
         """
-        print(
+        printWarning(
             f"WARNING: skipping FBL CC txn msg ({reason}); "
             f'msg received {sms.attrib.get("readable_date", "?")}'
         )

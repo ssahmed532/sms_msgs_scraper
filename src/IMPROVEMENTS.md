@@ -25,6 +25,22 @@ Python 3.14 modernization opportunities, bugs, code quality, and test coverage g
 > fell through the chain into `OTHER`**. Duplicates now land in a dedicated `DUP` bucket, and the
 > identity `ALL == HBL + FBL + SCB + MEZN + OTHER + DUP` is pinned by a test.
 
+> **Status note (2026-08-26), Rich output.** Every line the tool prints now goes through the shared
+> Rich console in `console_ui.py`, which changed the standing of three items:
+>
+> - **3d** (unused `PrettyPrinter` import) — RESOLVED. Both `pprint` imports are gone: the monthly
+>   summaries render as tables with a totals footer instead of a pretty-printed dict.
+> - **4a** (mixed `click.echo()` and `print()`) — RESOLVED, but not the way it proposed. Rather than
+>   standardizing on `click.echo()`, the CLI standardizes on the Rich console; `click.echo` is gone
+>   from the module. `CliRunner` still captures it, because the console resolves `sys.stdout` at
+>   write time rather than capturing it at import — pinned by the end-to-end tests in
+>   `test_cli_commands.py`.
+> - **6a/6b** (test coverage) — the CLI end-to-end gap named below is now closed: 12 `CliRunner`
+>   tests exercise each subcommand's rendered output, the empty-state path and the option wiring.
+>   The suite is at 132 tests.
+>
+> **3c** (global mutable `smsParser`) is untouched and still open.
+
 ---
 
 ## 1. Performance & Optimization Issues
@@ -430,19 +446,17 @@ def list_all_vendors(ctx):
 
 ---
 
-### 3d. Unused import
+### 3d. Unused import — **RESOLVED (Rich output)**
 
 **File:** `sms_txn_query_tool.py:4`
 **Severity:** Low
 
-`from pprint import PrettyPrinter` is imported but never used. Only `pprint.pprint` (from
-`import pprint` on line 1) is actually called.
+`from pprint import PrettyPrinter` was imported but never used. Only `pprint.pprint` (from
+`import pprint` on line 1) was actually called.
 
-**Fix:** Remove line 4:
-```python
-# Delete this line:
-from pprint import PrettyPrinter
-```
+**Resolved:** both imports are gone. The monthly summaries no longer pretty-print a dict — they
+render a Rich table with one row per month, one column per currency actually spent, and a grand
+total footer.
 
 ---
 
@@ -513,17 +527,26 @@ duplicate = msg_hash in self.msgHashes
 
 ## 4. Inconsistencies
 
-### 4a. Mixed `click.echo()` and `print()`
+### 4a. Mixed `click.echo()` and `print()` — **RESOLVED (Rich output)**
 
 **File:** `sms_txn_query_tool.py`
 **Severity:** Low
 
-The file uses both `click.echo()` (lines 36, 50–57, 62–68) and bare `print()` (lines 40–41,
-101, 106–110). In a Click application, `click.echo()` should be used consistently — it
-handles encoding issues across platforms and can be captured by Click's testing utilities
-(`CliRunner`).
+The file used both `click.echo()` and bare `print()`, so output went through two mechanisms with
+different encoding and capture behaviour.
 
-**Fix:** Replace all `print()` calls with `click.echo()` in the CLI module.
+**Resolved, but not as proposed.** Standardizing on `click.echo()` was the obvious fix; the module
+standardizes on the shared Rich console instead, and `click.echo` no longer appears in it. The two
+properties the fix was after are still there:
+
+- **Capture by `CliRunner`** — the console is built without a `file`, so Rich resolves `sys.stdout`
+  at write time. `CliRunner` (and `redirect_stdout`) therefore capture it. Pinned by the end-to-end
+  tests in `test_cli_commands.py`.
+- **Encoding** — `console_ui` reconfigures stdout *and* stderr to UTF-8 at import, because Windows
+  hands back a cp1252 stream as soon as either is redirected and Rich's box-drawing characters are
+  not encodable there.
+
+The parsers' warning lines went the same way, through `printWarning` / `printError`.
 
 ---
 

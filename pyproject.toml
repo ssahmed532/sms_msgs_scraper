@@ -10,6 +10,13 @@ dependencies = [
     # common.py / cc_txn.py raise ZoneInfoNotFoundError without this.
     # Bump periodically — this is the tz rule database, not just a library.
     "tzdata==2026.3",
+    # Every line this tool prints goes through a Rich console: themed tables,
+    # colour-coded by bank / currency / txn type, and warnings that read as
+    # warnings. See src/console_ui.py.
+    "rich==15.0.0",
+    # Rich rendering for Click's own --help and usage errors. It is a drop-in
+    # `import rich_click as click`, so the commands themselves are unchanged.
+    "rich-click==1.9.8",
 ]
 
 # There is no importable package here — src/ is a flat script directory and

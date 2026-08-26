@@ -55,6 +55,15 @@ uv run src/sms_txn_query_tool.py <path_to_sms_backup.xml> <command> [OPTIONS]
 #
 # list_all_debit_txns also accepts:
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
+#
+# Both monthly summary commands also accept:
+#   --verbose / -v                 - also list the txns the summary was built from
+#
+# The group itself accepts --no-color, which must be written BEFORE the filepath:
+#   uv run src/sms_txn_query_tool.py --no-color backup.xml list_all_cc_txns
+# A Click group stops parsing its own options at the first positional argument, so the
+# same flag after the path is read as the filepath value. Colour is dropped on its own
+# when output is piped or NO_COLOR is set, so the flag is rarely needed.
 ```
 ```bash
 uv run src/sms_txn_query_tool.py backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024-12-31
@@ -99,7 +108,13 @@ uv lock --upgrade       # re-resolve within pyproject.toml constraints
   uv-managed interpreters bundle none, so the module-scope `ZoneInfo("Asia/Karachi")` in
   `common.py` / `cc_txn.py` raises `ZoneInfoNotFoundError` without it. Bump periodically — this is
   the tz rule database, not just a library.
-- Standard library only otherwise (`xml.etree.ElementTree`, `hashlib`, `datetime`, `re`, `dataclasses`, `zoneinfo`, `collections`, `pathlib`, `pprint`, `time`)
+- `rich==15.0.0` — every line the tool prints goes through the shared console in
+  `console_ui.py`: themed tables, colour coded by bank / currency / txn type, and warnings
+  that read as warnings.
+- `rich-click==1.9.8` — Rich rendering for Click's own `--help` and usage errors. It is a
+  drop-in `import rich_click as click`, so every decorator, type and exception in the CLI
+  module is still Click's own.
+- Standard library only otherwise (`xml.etree.ElementTree`, `hashlib`, `datetime`, `re`, `dataclasses`, `zoneinfo`, `collections`, `contextlib`, `pathlib`, `sys`, `time`)
 
 ## Architecture
 
@@ -123,6 +138,7 @@ sms_msgs_scraper/
 │   ├── cc_txn.py                 # CC txn data model (CreditCardTxnDC dataclass)
 │   ├── debit_txn.py              # Account debit data model (DebitTxnDC, DebitTxnType)
 │   ├── common.py                 # Enums (Currency, SpendingCategories), constants (DEFAULT_TZ)
+│   ├── console_ui.py             # Shared Rich console, theme and formatting helpers
 │   ├── parser/
 │   │   ├── hbl_sms_parser.py     # HBL CC txn parsing (regex-based)
 │   │   ├── fbl_sms_parser.py     # Faysal Bank CC txn parsing
@@ -152,21 +168,62 @@ because that is where the executed script lives.
 
 ### Module Relationships
 ```
-sms_txn_query_tool.py (CLI entry point via Click)
+sms_txn_query_tool.py (CLI entry point via rich_click)
     ├── common.py (Currency enum)
     ├── cc_txn.py (CreditCardTxnDC dataclass)
     ├── debit_txn.py (DebitTxnDC, DebitTxnType)
+    ├── console_ui.py (console, theme, table + cell helpers)
     └── sms_backup_file_parser.py (orchestrator)
+            ├── console_ui.py (parse summary tables)
             ├── parser/hbl_sms_parser.py  ─┐
             ├── parser/fbl_sms_parser.py   ├─→ cc_txn.py (CreditCardTxnDC, CurrencyAmountTuple)
             ├── parser/scb_sms_parser.py  ─┘
             └── parser/mezn_sms_parser.py ──→ debit_txn.py (DebitTxnDC, DebitTxnType)
                                               cc_txn.py (CurrencyAmountTuple)
+
+Every parser also imports console_ui for printWarning / printError. console_ui itself is a
+leaf: it imports nothing from this project, so no module can create an import cycle by
+rendering through it.
 ```
 
 ### Key Components
 
-**`sms_txn_query_tool.py`** — Click CLI entry point. Defines a `@click.group()` with a required `filepath` argument and five subcommands (three CC, two debit). Uses a **global** `smsParser` variable shared between the group callback and subcommands. Measures parse time with `perf_counter`. Only catches `PermissionError` from file loading.
+**`sms_txn_query_tool.py`** — CLI entry point, on `rich_click` (a drop-in re-export of Click
+that renders `--help` and usage errors through Rich). Defines a `@click.group()` with a required
+`filepath` argument, a `--no-color` flag, and five subcommands (three CC, two debit). Uses a
+**global** `smsParser` variable shared between the group callback and subcommands. Measures parse
+time with `perf_counter`. Catches `PermissionError` and `ET.ParseError` from file loading and
+reports both as a bad `FILEPATH`; `dir_okay=False` rejects a directory before it can reach
+`ET.parse`.
+
+Every command renders a table rather than a line per row, and every one of them handles the empty
+case explicitly — a filter matching nothing prints a "nothing matched" panel, because a table
+header with no rows under it reads as a defect in the tool rather than as an answer.
+
+`--help` groups the subcommands into a CC panel and a debit panel via `rich_click.COMMAND_GROUPS`,
+keyed on `"*"`: the tool runs as a script path rather than an installed console script, so its
+command path is whatever `argv[0]` happened to be and an exact key would not match.
+
+**`console_ui.py`** — the shared Rich console, the theme and the cell/table helpers. One console
+instance for the whole app, so a bank tag, a currency, an amount, a txn type or a warning looks the
+same wherever it is rendered. Three things here are load-bearing:
+
+- **All output goes to stdout, warnings included.** `scripts/verify_against_backup.py` swallows the
+  parsers' per-msg warnings with `redirect_stdout` because they can identify a msg in a personal
+  backup, and `tests/test_scb_sms_parser.py` asserts on that same stream. Routing warnings to
+  stderr would leak them past both.
+- **The console is built without a `file`**, so Rich resolves `sys.stdout` at write time rather than
+  capturing it at import. That is what keeps `redirect_stdout` and `CliRunner` working, and what
+  makes a non-tty render as plain, uncoloured text.
+- **stdout *and* stderr are reconfigured to UTF-8 at import.** Windows hands back a cp1252 stream as
+  soon as either is redirected to a file or a pipe, and Rich's box-drawing characters are not
+  encodable there — a redirected run died on `UnicodeEncodeError`, and rich_click's error panel came
+  out as rows of literal escape text (stderr defaults to `errors="backslashreplace"`).
+
+Warnings render with `markup=False` (the HBL parser's warnings still carry msg bodies, and a body
+containing brackets would otherwise be eaten as console markup) and `soft_wrap=True`, which keeps
+the convention that one parse failure is exactly one line — the verification harness counts them.
+`statusSpinner()` is a no-op outside a terminal, so a piped run carries no stray progress line.
 
 **`SmsBackupFileParser`** (`sms_backup_file_parser.py`) — Orchestrator class. Loads the entire XML
 tree via `ET.parse()`, iterates `<sms>` elements, skips `<mms>` elements, then for each msg:
@@ -326,6 +383,14 @@ Example: `"Dear Customer, Your HBL CreditCard (ending with 8526) has been charge
 - Instance variables use **camelCase** in `SmsBackupFileParser` (e.g., `ccVendors`, `ccTxns`, `msgsParsed`) but **snake_case** in `HBLSmsParser` (e.g., `xml_tree`, `cc_txns`, `all_vendors`) — inconsistent
 - Bank parsers expose **static methods** for identification and extraction
 - Tests use `unittest` (not pytest) and create XML elements programmatically via `ET.Element` rather than loading from fixture files
+- **Nothing prints with bare `print()` or `click.echo()`.** All output goes through `console_ui`
+  — `console.print`, `printWarning`, `printError`, `printNotice`, `printRule`, `printEmptyState`
+  — so that one theme decides what everything looks like. Pass data-derived strings as `Text`
+  (`vendorText`, `labelText`, ...) rather than as `str`: a vendor name containing brackets would
+  otherwise be parsed as Rich console markup.
+- **A new bank, currency or debit type must not need a theme entry.** `_styleFor()` falls back to
+  the namespace's `.unknown` style, so an unseen 3-letter currency code renders instead of raising
+  `MissingStyle` at the moment someone runs a report.
 - **A parse failure returns `None` and prints exactly one warning line**, carrying the reason and the
   msg's `readable_date` — never the body. Bodies are personal financial data, and the reference
   backup produces 26 skips in one run. The orchestrator only counts; it does not warn again. (HBL's
@@ -378,10 +443,17 @@ Documented in detail in `src/IMPROVEMENTS.md`. Key items:
 - **Duplicate `DEFAULT_TZ`** definition in both `common.py` and `cc_txn.py`. The three newer parsers import it from `common.py`; HBL still uses `CreditCardTxnDC.DEFAULT_TZ`.
 - **`SpendingCategories` enum** defined but unused anywhere
 - **Global mutable state** (`smsParser`) in CLI module instead of using Click context
-- **Unused import** `PrettyPrinter` in `sms_txn_query_tool.py`
+- **The backup is loaded and parsed even for `<command> --help`**, because the group callback runs
+  first. Harmless but wasteful, and it means a subcommand's help arrives under a parse summary.
 - **HBL amount regex requires comma-grouped thousands** — `PKR-25170.49` (no comma, >= 1,000) fails to parse, returns the `(None, -1.2345)` sentinel, and the `assert` in `extractDetailsFromTxnMsg` then aborts the whole run. Pinned by `test_extractCurrencyAndAmount_ungrouped_thousands`. The newer parsers return `None` and skip instead of asserting.
 - **HBL is the only bank that asserts** on extraction results, so one malformed HBL txn msg aborts the entire run. The other three skip + warn + count.
-- **Remaining test gaps** — CLI subcommand output/end-to-end runs (`CliRunner` invocations). Parser methods, `SmsBackupFileParser` (dedup, routing, conservation, mixed-bank), command registration, option wiring, the bank filter and monthly-total seeding are all covered.
+- **Remaining test gaps** — none of the previously listed ones. Parser methods,
+  `SmsBackupFileParser` (dedup, routing, conservation, mixed-bank), command registration, option
+  wiring, the bank filter, monthly-total seeding **and** end-to-end CLI output (`CliRunner`
+  invocations over a synthetic backup: rendered tables, the empty-state path, `--verbose`,
+  `--no-color` ordering, a directory rejected as FILEPATH) are all covered. What the suite still
+  cannot check is how any of it *looks* — colour is stripped in a non-tty, so the theme itself is
+  only exercised for "does it resolve a style", not for legibility.
 - **A tz test cannot fail on a machine already set to +05:00** — `astimezone()` is a no-op there, so a stamped-vs-converted bug passes locally. Windows offers no way to simulate another timezone in-process, so the stamping rule is enforced by convention and review, not by the suite.
 
 ### Known parsing limitations (accepted, not bugs)
