@@ -1,5 +1,10 @@
+import re
+import tomllib
 import unittest
 from datetime import datetime
+from pathlib import Path
+
+from click.testing import CliRunner
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
@@ -25,6 +30,29 @@ class TestCliCommandRegistration(unittest.TestCase):
                 "monthly_debit_spending_summary",
             },
         )
+
+    def test_cli_version_matches_project_metadata(self):
+        """Test method to verify that --version and the packaging metadata
+        report the same version. They are declared in two different files
+        (@click.version_option in hbl_sms_query_tool.py, and [project].version
+        in pyproject.toml) with nothing tying them together, so they drift
+        apart silently — and then a release identifies itself differently
+        depending on who is asking.
+        """
+        # --version is an eager option, so it prints and exits before the
+        # required filepath argument is parsed
+        result = CliRunner().invoke(cli, ["--version"])
+        self.assertEqual(result.exit_code, 0)
+
+        reported = re.search(r"version\s+(\S+)", result.output)
+        self.assertIsNotNone(reported, f"unexpected --version output: {result.output!r}")
+
+        pyprojectPath = Path(__file__).parent.parent / "pyproject.toml"
+        projectVersion = tomllib.loads(pyprojectPath.read_text(encoding="utf-8"))[
+            "project"
+        ]["version"]
+
+        self.assertEqual(reported.group(1), projectVersion)
 
     def _optionNames(self, commandName: str) -> set:
         return {param.name for param in cli.commands[commandName].params}
