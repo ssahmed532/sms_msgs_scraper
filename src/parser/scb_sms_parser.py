@@ -4,6 +4,7 @@ from datetime import datetime
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
+from console_ui import printWarning
 
 
 class SCBSmsParser:
@@ -74,7 +75,7 @@ class SCBSmsParser:
         raise.
         """
         receivedAt = sms.attrib.get("readable_date", "?")
-        print(f"WARNING: skipping SCB msg received {receivedAt}: {reason}")
+        printWarning(f"WARNING: skipping SCB msg received {receivedAt}: {reason}")
 
     @staticmethod
     def _extractCurrencyAndAmount(currency: str, amount: str) -> CurrencyAmountTuple:
@@ -104,7 +105,7 @@ class SCBSmsParser:
             return int(m.group(1))
 
         if not SCBSmsParser.SCB_CARD_BIN_ONLY_PTTRN.fullmatch(mask):
-            print(
+            printWarning(
                 "WARNING: unrecognized SCB card mask shape; recording the txn "
                 "with no card digits"
             )

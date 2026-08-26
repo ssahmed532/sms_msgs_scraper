@@ -4,6 +4,7 @@ from datetime import datetime
 
 from cc_txn import CurrencyAmountTuple
 from common import DEFAULT_TZ
+from console_ui import printError
 from debit_txn import DebitTxnDC, DebitTxnType
 
 
@@ -166,7 +167,7 @@ class MeznSmsParser:
                 currencyValue.strip(), float(amountValue.strip().replace(",", ""))
             )
         except ValueError:
-            print(
+            printError(
                 f"ERROR: unable to parse Meezan txn amount into float value: "
                 f"{amountValue}"
             )
@@ -191,7 +192,7 @@ class MeznSmsParser:
             except ValueError:
                 continue
 
-        print(f"ERROR: unable to parse Meezan txn date/time: {strValue}")
+        printError(f"ERROR: unable to parse Meezan txn date/time: {strValue}")
 
         return None
 
@@ -220,7 +221,9 @@ class MeznSmsParser:
                 m.group("currency"), m.group("amount")
             )
             if (not currencyAndAmount.currency) or (currencyAndAmount.amount <= 0):
-                print(f"ERROR: bad amount in Meezan debit msg received on {receivedOn}")
+                printError(
+                    f"ERROR: bad amount in Meezan debit msg received on {receivedOn}"
+                )
                 return None
 
             datetimeObj = MeznSmsParser._convertToDateTime(
@@ -231,7 +234,9 @@ class MeznSmsParser:
 
             vendor = m.group("vendor").strip()
             if not vendor:
-                print(f"ERROR: empty vendor in Meezan debit msg received on {receivedOn}")
+                printError(
+                    f"ERROR: empty vendor in Meezan debit msg received on {receivedOn}"
+                )
                 return None
 
             # The uppercase transfer template has no account clause at all.
@@ -247,7 +252,7 @@ class MeznSmsParser:
                 acctMask=acctMask,
             )
 
-        print(
+        printError(
             "ERROR: unable to match any Meezan debit template against msg "
             f"received on {receivedOn}"
         )

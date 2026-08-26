@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
+from console_ui import printError
 
 
 class HBLSmsParser:
@@ -61,7 +62,7 @@ class HBLSmsParser:
                 amount = float(m.group("amount").strip().replace(",", ""))
                 return CurrencyAmountTuple(currency, amount)
             except ValueError:
-                print(
+                printError(
                     f'ERROR: unable to parse txn amount into float value: {m.group("amount").strip()}'
                 )
 
@@ -80,7 +81,7 @@ class HBLSmsParser:
                 strValue, HBLSmsParser.HBL_TXN_DATE_FMT
             ).replace(tzinfo=CreditCardTxnDC.DEFAULT_TZ)
         except ValueError:
-            print(f"ERROR: unable to parse string into datetime: {strValue}")
+            printError(f"ERROR: unable to parse string into datetime: {strValue}")
 
         return datetimeObj
 
@@ -100,7 +101,7 @@ class HBLSmsParser:
                 ccLast4Digits = int(strValue)
             except ValueError:
                 ccLast4Digits = -9999
-                print(
+                printError(
                     f"ERROR: unable to parse the last 4 digits of the CC for txn: {strValue}"
                 )
 
@@ -120,7 +121,9 @@ class HBLSmsParser:
                 ccLastFourDigits=ccLast4Digits,
             )
         else:
-            print(f'ERROR: unable to match RE against SMS msg: {sms.attrib["body"]}')
+            printError(
+                f'ERROR: unable to match RE against SMS msg: {sms.attrib["body"]}'
+            )
 
         return ccTxn
 

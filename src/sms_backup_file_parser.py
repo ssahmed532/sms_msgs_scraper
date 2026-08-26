@@ -2,6 +2,15 @@ import hashlib
 import xml
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+
+from console_ui import (
+    EMPTY_VALUE,
+    bankText,
+    countText,
+    labelText,
+    printSideBySide,
+    summaryTable,
+)
 from parser.fbl_sms_parser import FBLSmsParser
 from parser.hbl_sms_parser import HBLSmsParser
 from parser.mezn_sms_parser import MeznSmsParser
@@ -213,14 +222,6 @@ class SmsBackupFileParser:
             else:
                 self.msgCounts["OTHER"] += 1
 
-        print("Parsed messages summary:")
-        print(f"\tMessages from HBL:    {self.msgCounts[HBLSmsParser.ID]}")
-        print(f"\tMessages from FBL:    {self.msgCounts['FBL']}")
-        print(f"\tMessages from SCB:    {self.msgCounts['SCB']}")
-        print(f"\tMessages from Meezan: {self.msgCounts['MEZN']}")
-        print(f"\tOther SMS Messages:   {self.msgCounts['OTHER']}")
-        print(f"\tDuplicate msgs:       {self.msgCounts['DUP']}")
-        print(f"\tAll msgs count:       {self.msgCounts['ALL']}")
         # Per-bank txn counts are derived from the txn stores rather than kept
         # as separate counters, so they cannot drift out of sync with what the
         # commands actually list.
@@ -228,22 +229,88 @@ class SmsBackupFileParser:
         for ccTxn in self.ccTxns:
             ccTxnsPerBank[ccTxn.bank] += 1
 
-        print("Transactions summary:")
-        print(f"\tHBL CC txns:          {ccTxnsPerBank['HBL']}")
-        print(
-            f"\tFBL CC txns:          {ccTxnsPerBank['FBL']}"
-            f"  (skipped: {self.msgCounts['FBL_SKIPPED']})"
-        )
-        print(
-            f"\tSCB CC txns:          {ccTxnsPerBank['SCB']}"
-            f"  (skipped: {self.msgCounts['SCB_SKIPPED']})"
-        )
-        print(
-            f"\tMeezan debit txns:    {len(self.debitTxns)}"
-            f"  (skipped: {self.msgCounts['MEZN_SKIPPED']})"
-        )
+        self._printParseSummary(ccTxnsPerBank)
 
         return self.msgCounts["ALL"]
+
+    def _printParseSummary(self, ccTxnsPerBank: dict) -> None:
+        """Render the two parse summary tables: where the msgs came from, and
+        what was extracted from them.
+
+        They are printed side by side because they are read together — the
+        conservation identity ALL == HBL+FBL+SCB+MEZN+OTHER+DUP is checked by
+        eye against the left table, and the right one says how much of that
+        turned into txns.
+        """
+        msgTable = summaryTable("Messages parsed")
+        msgTable.add_column("Source")
+        msgTable.add_column("Msgs", justify="right")
+
+        for bankId in (
+            HBLSmsParser.ID,
+            FBLSmsParser.ID,
+            SCBSmsParser.ID,
+            MeznSmsParser.ID,
+        ):
+            msgTable.add_row(bankText(bankId), countText(self.msgCounts[bankId]))
+
+        msgTable.add_row(
+            labelText("OTHER", style="bucket.other"),
+            countText(self.msgCounts["OTHER"], style="bucket.other"),
+        )
+        msgTable.add_row(
+            labelText("DUP", style="bucket.dup"),
+            countText(self.msgCounts["DUP"], style="bucket.dup"),
+        )
+        msgTable.add_section()
+        msgTable.add_row(
+            labelText("ALL", style="column.total"),
+            countText(self.msgCounts["ALL"], style="column.total"),
+        )
+
+        txnTable = summaryTable("Transactions extracted")
+        txnTable.add_column("Bank")
+        txnTable.add_column("Kind")
+        txnTable.add_column("Txns", justify="right")
+        txnTable.add_column("Skipped", justify="right")
+
+        # HBL has no skipped column to report: that branch asserts on its
+        # extraction results rather than skipping, so a bad msg aborts the run
+        # instead of being counted. A dash says "not counted here", where a 0
+        # would claim nothing was ever skipped.
+        txnRows = (
+            (HBLSmsParser.ID, "credit card", ccTxnsPerBank["HBL"], None),
+            (FBLSmsParser.ID, "credit card", ccTxnsPerBank["FBL"], "FBL_SKIPPED"),
+            (SCBSmsParser.ID, "credit card", ccTxnsPerBank["SCB"], "SCB_SKIPPED"),
+            (MeznSmsParser.ID, "account debit", len(self.debitTxns), "MEZN_SKIPPED"),
+        )
+
+        for bankId, kind, txnCount, skippedKey in txnRows:
+            if skippedKey is None:
+                skipped = labelText(EMPTY_VALUE, style="column.empty")
+            else:
+                skippedCount = self.msgCounts[skippedKey]
+                skipped = countText(
+                    skippedCount,
+                    style="bucket.skipped" if skippedCount else "column.empty",
+                )
+
+            txnTable.add_row(
+                bankText(bankId),
+                labelText(kind, style="muted"),
+                countText(txnCount),
+                skipped,
+            )
+
+        txnTable.add_section()
+        txnTable.add_row(
+            labelText("ALL", style="column.total"),
+            labelText("", style="column.total"),
+            countText(len(self.ccTxns) + len(self.debitTxns), style="column.total"),
+            labelText("", style="column.total"),
+        )
+
+        printSideBySide(msgTable, txnTable)
 
 
 if __name__ == "__main__":
