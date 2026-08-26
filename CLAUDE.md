@@ -14,7 +14,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 0.3.0 (declared in `hbl_sms_query_tool.py` via `@click.version_option`)
+**Version:** 1.0.0 — declared in **two** places that must agree: `@click.version_option` in `hbl_sms_query_tool.py` and `[project].version` in `pyproject.toml` (which `uv.lock` also carries). A test pins them equal, because they had already drifted apart once.
 
 ## Development Commands
 

@@ -3,7 +3,7 @@
 A comprehensive audit of the SMS Messages Scraper codebase, covering performance issues,
 Python 3.14 modernization opportunities, bugs, code quality, and test coverage gaps.
 
-> **Status note (2026-08-26).** The multi-bank parser work (FBL, SCB and Meezan; version 0.3.0)
+> **Status note (2026-08-26).** The multi-bank parser work (FBL, SCB and Meezan; version 1.0.0)
 > resolved some of the items below and changed the context of others. Resolved items are marked
 > **RESOLVED** in place rather than deleted, so the reasoning stays available.
 >
@@ -96,7 +96,7 @@ def _isSmsDuplicate(self, sms) -> bool:
 
 ---
 
-### 1c. Duplicate hash computed multiple times per message — **RESOLVED (0.3.0)**
+### 1c. Duplicate hash computed multiple times per message — **RESOLVED (1.0.0)**
 
 **File:** `sms_backup_file_parser.py:109-128`
 **Severity:** Medium
@@ -600,7 +600,7 @@ if not address:
 
 ---
 
-### 5b. `_updateMonthlyTotals` doesn't leverage `defaultdict` — **RESOLVED (0.3.0)**
+### 5b. `_updateMonthlyTotals` doesn't leverage `defaultdict` — **RESOLVED (1.0.0)**
 
 **File:** `hbl_sms_query_tool.py:74-87`
 **Severity:** Low

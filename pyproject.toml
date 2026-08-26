@@ -1,6 +1,6 @@
 [project]
 name = "sms-msgs-scraper"
-version = "0.3.0"
+version = "1.0.0"
 description = "Parse and analyze credit card transaction SMS messages from Pakistani banks"
 requires-python = ">=3.14"
 dependencies = [
