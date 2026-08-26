@@ -163,9 +163,9 @@ all.
 worth knowing, both pinned by tests:
 - A duplicate is counted as `DUP` and nothing else. It used to fail its bank's branch condition and
   fall through the `elif` chain into `OTHER`.
-- Hashing covers the body **only**, so dedup is **cross-sender**: an identical body relayed by a
-  second sender counts as `DUP` rather than as a msg from that sender. On the reference backup this
-  costs SCB exactly one msg (614 → 613); it is not lost, and conservation still balances.
+- The identity is **(sender short code, stripped body)**, so a msg can only ever be suppressed by an
+  earlier msg *from the same short code*. It deliberately does **not** include a received timestamp:
+  see the dedup limitations below for the measurements that rule both candidate timestamps out.
 
 The per-duplicate body dump is deliberately gone: global dedup finds 258 duplicates in the reference
 backup, and printing the original/duplicate pair for each buried real output under ~1,500 lines.
@@ -311,8 +311,8 @@ dedups before parsing, so a raw-corpus grep will always be higher and is not com
 
 | Metric | Value |
 |---|---|
-| `ALL` / `DUP` | 4,665 / 258 |
-| msgs HBL / FBL / SCB / MEZN / OTHER | 797 / 673 / 613 / 1,227 / 1,097 |
+| `ALL` / `DUP` | 4,665 / 235 |
+| msgs HBL / FBL / SCB / MEZN / OTHER | 798 / 674 / 614 / 1,228 / 1,116 |
 | `ccTxns` total | 1,678 |
 | CC txns HBL / FBL / SCB | 717 / 583 / 378 |
 | skipped FBL / SCB / MEZN | 0 / 26 / 0 |
@@ -322,10 +322,13 @@ dedups before parsing, so a raw-corpus grep will always be higher and is not com
 | unique CC vendor union (HBL ∪ FBL ∪ SCB) | 357 |
 | FBL currency split PKR / USD / CAD | 574 / 8 / 1 |
 
-`SCB` is 613 rather than 614, and `OTHER` 1,097 rather than 1,354, because dedup runs once for every
-sender: retransmitted promos from non-bank senders became `DUP`, and one SCB body duplicates an
-earlier non-bank msg. Both are consequences of body-only hashing, not lost msgs — conservation
-balances either way.
+`OTHER` is 1,116 rather than 1,354 because dedup now runs once for every sender rather than only
+inside a bank branch, so retransmitted promos from non-bank senders are counted as `DUP`.
+
+The per-bank counts are each one higher than they were before the dedup identity gained the sender
+(HBL 797, FBL 673, SCB 613, MEZN 1,227, `DUP` 258). Those 23 msgs — 4 from bank short codes — were
+being suppressed by an unrelated sender that happened to repeat their text. **No txn figure moved**:
+all 23 are non-txn msgs, which is why the CC and debit counts are identical either way.
 
 The 26 SCB skips are the bank's own malformed msgs: 21 truncated mid-body and 5 carrying a literal
 `PKR .00` (foreign-currency txns whose amount is absent). They are expected, not a defect — a change
@@ -352,17 +355,30 @@ Documented in detail in `src/IMPROVEMENTS.md`. Key items:
 
 ### Known parsing limitations (accepted, not bugs)
 
-- **Dedup is cross-sender and body-only.** Two senders relaying an identical body collapse to one
-  msg; two legitimately identical purchases (same vendor, amount, date — CC bodies carry no time of
-  day) collapse to one txn.
+- **Two legitimately identical purchases can still collapse into one txn, but only for HBL and SCB.**
+  FBL and Meezan bodies carry a time of day (to the second and to the minute), so an identical body
+  provably means the same txn and dedup is exact for them. HBL and SCB bodies carry a *date only*, so
+  a genuine second identical purchase on the same day is indistinguishable from a retransmission. On
+  the reference backup this is at most 3 msgs (2 HBL, 1 SCB), whose repeats arrived 1.5–6 minutes
+  apart; every other repeat arrived within 8 seconds and is plainly a retransmission.
+
+  **A received timestamp cannot fix this, and would make things worse.** Measured on the reference
+  backup: the network redelivers the *same* alert as much as 2.9 hours late (two FBL retransmissions
+  arrived 19 minutes and 2.9 hours after their originals, and their bodies pin the txn to the second,
+  so they are provably the same txn) — any useful "within N minutes" window would have admitted them
+  as second purchases and inflated spending. `date_sent` is no better: it differs on 138 of the 145
+  repeated (sender, body) groups, including those same provably-identical txns, so adding it would
+  disable dedup almost entirely. Fabricating spending is worse than the residual, so the identity
+  stays with what the msg says rather than when it arrived.
 - **Meezan normalizes internal whitespace for matching, but the hash does not.** Two Meezan bodies
   differing only in internal spacing hash differently and both parse. Real duplicates are
   byte-identical retransmissions, so this has no effect in practice.
 - **SCB vendors keep a glued-on city** (`SOUTH CITY HOSPITALKarachi PAK`) — the corpus offers no
   reliable separator, so no split is attempted.
-- **An unrecognized SCB card-mask shape yields last4 `0`**, indistinguishable from a legitimate
-  BIN-only mask. If SCB moves to a 6-digit BIN (`545221xxxxxx1280`), the last 4 digits are present in
-  the body but recorded as 0, with no warning. Worth a warning if that shape ever appears.
+- **SCB card masks:** the last 4 digits are recovered from any mask whose digits are interrupted by a
+  masked section, so a 6-digit BIN (`545221xxxxxx1280`) works rather than silently recording card 0.
+  A shape that is neither that nor an unmasked BIN-only run is warned about, since a bare `0` is
+  otherwise indistinguishable from a legitimate BIN-only mask.
 - **An FBL vendor containing an internal double space would mis-split** to its first token. No such
   vendor exists in the corpus; the split rule is pinned by unit tests on the known shapes.
 - **Meezan cheque-clearing debits are deliberately out of scope** — they risk double-counting against
