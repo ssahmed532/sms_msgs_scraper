@@ -20,6 +20,58 @@ Every message format below was **validated against the real backup `sms-20251011
 2. **CLI shape**: FBL + SCB CC txns merge into the existing three CC commands, each txn tagged with its bank, with a new `--bank` filter. Meezan debit txns get separate commands.
 3. **SCB unusable msgs** (21 truncated mid-body + 5 literal `PKR .00` foreign-currency msgs): skip + log one warning line each + track a per-bank skipped count shown in the parse summary.
 
+## Post-review amendment (2026-08-26): dedup identity gained the sender — msg counts re-derived
+
+Review of PR-0 raised that global **body-only** dedup, applied *before* routing, can discard valid
+msgs: an earlier msg from any sender suppresses a later bank msg that merely repeats its text. It
+can, and it did — measured on `sms-20251011130814.xml`, **23 msgs** were being suppressed
+cross-sender, **4 of them from bank short codes** (1 each HBL/FBL/SCB/MEZN). The plan's original
+footnote described this as costing SCB exactly one msg; that undercounted it by a factor of 23.
+
+**Fix:** the dedup identity is now `(sender short code, stripped body)` rather than the body alone.
+Dedup still runs before routing, which is now harmless: the sender is part of the key, so a msg can
+only be suppressed by an earlier msg from the same short code.
+
+**Re-derived msg counts** (this is the recorded derivation the Anti-drift rule requires; the harness
+and `CLAUDE.md` were updated to match, and nothing was adjusted to fit observed output):
+
+| Bucket | body-only | (sender, body) |
+|---|---|---|
+| HBL | 797 | **798** |
+| FBL | 673 | **674** |
+| SCB | 613 | **614** |
+| MEZN | 1,227 | **1,228** |
+| OTHER | 1,097 | **1,116** |
+| DUP | 258 | **235** |
+| ALL | 4,665 | 4,665 |
+
+Conservation still holds (798 + 674 + 614 + 1,228 + 1,116 + 235 = 4,665). **Every txn figure is
+unchanged** — 1,678 CC txns (717/583/378), 875 debits (8/361/96/410), vendors 180/166/94/189, CC
+union 357, FBL split 574/8/1, skipped 0/26/0 — because all 23 recovered msgs are non-txn msgs. SCB
+returning to 614 also retires the plan's footnote ¹: that discrepancy *was* this bug, not an
+inherent consequence of hashing.
+
+**A received timestamp was deliberately NOT added to the identity**, though the review suggested it.
+Measured, both candidates fail as a retransmission/distinct-txn discriminator and would fabricate
+spending:
+- `date` (received): the network redelivers the same alert as much as **2.9 hours** late. Two FBL
+  retransmissions arrived 19 minutes and 2.9 hours after their originals — and FBL bodies carry the
+  txn time **to the second**, so those are provably the same txn. Any "within N minutes" window
+  short enough to be meaningful admits them as second purchases.
+- `date_sent`: differs on **138 of the 145** repeated (sender, body) groups, including those same
+  provably-identical FBL txns. In the identity it would disable dedup almost entirely.
+
+**Residual, documented rather than guessed at:** FBL and Meezan bodies carry a time of day, so dedup
+is exact for them. HBL and SCB bodies carry a date only, so a genuine second identical purchase on
+the same day is indistinguishable from a retransmission — at most **3 msgs** on this corpus (2 HBL,
+1 SCB, repeats 1.5–6 minutes apart; all other repeats are within 8 seconds). That is a limit of what
+the SMS says, not of the dedup rule.
+
+Two smaller review items fixed alongside: `pyproject.toml` was still at 0.2.0 while the CLI reported
+0.3.0 (now pinned equal by a test that reads both), and SCB's last-4 extraction now handles any mask
+with an interrupted digit run — a 6-digit BIN was accepted as a txn but recorded with card 0 — and
+warns on a shape matching neither known form.
+
 ## Ground-truth numbers (re-validated 2026-08-26) — GATE ON THE POST-DEDUP COLUMN
 
 The original draft gated builders on raw-corpus counts, but the runtime dedups first, so those numbers can never

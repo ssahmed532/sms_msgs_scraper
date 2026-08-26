@@ -29,6 +29,9 @@ class CreditCardTxnDC:
     date: datetime
     vendor: str
     ccLastFourDigits: int = 0
+    # The bank that issued the Credit Card this txn was made on. Defaults to
+    # HBL so that every pre-existing call site (and test) stays valid.
+    bank: str = "HBL"
 
     def __repr__(self) -> str:
         """Custom/overridden __repr__ function for the CreditCardTxnDC data class
@@ -36,4 +39,4 @@ class CreditCardTxnDC:
         Returns:
             str: human-friendly string representing this Credit Card txn
         """
-        return f"CC Txn: {self.amountTuple.currency} {self.amountTuple.amount:.2f} at {self.vendor} on {self.date}"
+        return f"CC Txn [{self.bank}]: {self.amountTuple.currency} {self.amountTuple.amount:.2f} at {self.vendor} on {self.date}"

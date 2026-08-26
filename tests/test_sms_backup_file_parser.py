@@ -90,9 +90,12 @@ class TestSmsBackupFileParser(unittest.TestCase):
 
         self.assertEqual(len(parser.ccTxns), 1)
         self.assertEqual(parser.msgCounts["HBL"], 1)
-        # current routing quirk: a duplicate HBL msg fails the HBL branch
-        # condition and falls through the elif chain into OTHER
-        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        # duplicates are now detected once, up front, for every sender: a
+        # duplicate HBL msg counts as DUP instead of falling through the elif
+        # chain into OTHER (the routing quirk this pin used to record)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["OTHER"], 0)
+        # ALL counts <sms> elements, and is incremented before the dup check
         self.assertEqual(parser.msgCounts["ALL"], 2)
 
     def test_whitespace_only_variant_is_duplicate(self):
@@ -153,6 +156,247 @@ class TestSmsBackupFileParser(unittest.TestCase):
         self.assertEqual(parser.msgCounts["ALL"], 5)
         self.assertEqual(parser.ccTxns, [])
 
+    def test_msg_count_conservation(self):
+        """Test method to verify the conservation identity that must hold for
+        any backup: every counted msg lands in exactly one bucket, so
+        ALL == HBL + FBL + SCB + MEZN + OTHER + DUP. Also verifies that MMS
+        elements are excluded from every counter.
+        """
+        parser = self._parseBackup(
+            [
+                self._createHblTxnSms(),
+                self._createSms("8756", "FBL msg body"),
+                self._createSms("7220", "SCB msg body"),
+                self._createSms("8079", "Meezan msg body"),
+                self._createSms("1234", "msg from an unrecognized sender"),
+                # a duplicate of the FBL msg above
+                self._createSms("8756", "FBL msg body"),
+                ET.Element("mms"),
+            ]
+        )
+
+        perBucket = sum(
+            parser.msgCounts[bucket]
+            for bucket in ("HBL", "FBL", "SCB", "MEZN", "OTHER", "DUP")
+        )
+        self.assertEqual(parser.msgCounts["ALL"], perBucket)
+        # 6 <sms> elements; the MMS is not counted anywhere
+        self.assertEqual(parser.msgCounts["ALL"], 6)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+
+    def test_duplicate_from_unknown_sender_counted_as_dup(self):
+        """Test method to verify that dedup applies to every sender, not just
+        the recognized banks: a repeated msg from an unknown sender counts as
+        DUP rather than being counted twice as OTHER.
+        """
+        parser = self._parseBackup(
+            [
+                self._createSms("1234", "a promotional msg, retransmitted"),
+                self._createSms("1234", "a promotional msg, retransmitted"),
+            ]
+        )
+
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
+
+    def test_identical_body_from_two_senders_is_not_a_duplicate(self):
+        """Test method to verify that dedup never reaches across senders: the
+        sender short code is part of the msg identity, so an unrelated msg
+        cannot suppress a later bank msg that merely repeats its text.
+
+        This used to fail. Hashing the body alone made dedup cross-sender, and
+        because the check runs before routing, the bank msg was discarded before
+        anything knew which bank it came from — 23 msgs on the reference backup,
+        4 of them from bank short codes.
+        """
+        parser = self._parseBackup(
+            [
+                self._createSms("1234", "identical body from two senders"),
+                self._createSms("7220", "identical body from two senders"),
+            ]
+        )
+
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["SCB"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
+
+    def test_cross_sender_identical_txn_body_still_parses(self):
+        """Test method to verify the same thing where it costs money: a bank
+        txn msg whose body was already seen from another sender must still be
+        parsed into a txn, not silently dropped.
+        """
+        txnBody = self._createHblTxnSms().attrib["body"]
+
+        parser = self._parseBackup(
+            [
+                # an unrelated sender relaying the same text first
+                self._createSms("1234", txnBody),
+                self._createHblTxnSms(),
+            ]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 1)
+        self.assertEqual(parser.msgCounts["HBL"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
+
+    # ------------------------------------------------------------------
+    # Mixed-bank integration cases. These need all four parsers to exist,
+    # so they live here rather than in any single bank's test file.
+    # ------------------------------------------------------------------
+
+    def _createFblTxnSms(
+        self,
+        # padded to the real 22-char vendor column, and deliberately a
+        # different merchant from the HBL fixture's so that a vendor-set
+        # assertion can tell the two banks' contributions apart
+        vendor: str = "CHASE UP DEPT STORE   ",
+        amount: str = "8100",
+        currency: str = "PKR",
+        txnDate: str = "20-Sep-23 01:17:16 PM",
+    ) -> ET.Element:
+        body = (
+            f"Dear JOHN DOE, your FBL Card  has been charged for "
+            f"{currency} {amount} on {txnDate} at {vendor} KARACHI        PK."
+        )
+
+        return self._createSms("8756", body)
+
+    def _createScbTxnSms(
+        self,
+        vendor: str = "PSO SERVICE STATION 7Karachi PAK",
+        amount: str = "12,450.90",
+        txnDate: str = "29-09-23",
+        cardMask: str = "5452xxxxxxxx1280",
+    ) -> ET.Element:
+        body = (
+            f"Dear Client, PKR {amount} have been paid at {vendor} on "
+            f"{txnDate} using Credit Card no {cardMask}. Avail Limit "
+            f"PKR59563.45. SCBPL"
+        )
+
+        return self._createSms("7220", body)
+
+    def _createMeznAtmSms(
+        self,
+        vendor: str = "MEEZAN ATM DHA PHASE 6",
+        amount: str = "20,000.00",
+        txnDate: str = "15-Jun-24",
+        txnTime: str = "09:05",
+    ) -> ET.Element:
+        body = (
+            f"PKR {amount} cash withdrawn from {vendor} from A/C xxxxxx5602 "
+            f"KARACHI BRANCH on {txnDate} at {txnTime} Bal: PKR 1,234.00"
+        )
+
+        return self._createSms("8079", body)
+
+    def test_mixed_bank_backup(self):
+        """Test method to verify that a backup carrying one txn from each of
+        the four banks routes every msg to the right store: the three CC banks
+        share ccTxns/ccVendors, Meezan debits go to debitTxns/debitVendors, and
+        the per-bank msg counts and the conservation identity all hold at once.
+        """
+        parser = self._parseBackup(
+            [
+                self._createHblTxnSms(),
+                self._createFblTxnSms(),
+                self._createScbTxnSms(),
+                self._createMeznAtmSms(),
+                self._createSms("1234", "msg from an unrecognized sender"),
+            ]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 3)
+        self.assertEqual(
+            {txn.bank for txn in parser.ccTxns}, {"HBL", "FBL", "SCB"}
+        )
+        self.assertEqual(len(parser.debitTxns), 1)
+        self.assertEqual(parser.debitTxns[0].bank, "MEZN")
+
+        # a debit must not leak into the CC stores, nor a CC txn into the debit
+        # stores — the two are reported by different commands
+        self.assertEqual(len(parser.ccVendors), 3)
+        self.assertEqual(len(parser.debitVendors), 1)
+        self.assertTrue(parser.ccVendors.isdisjoint(parser.debitVendors))
+
+        for bank in ("HBL", "FBL", "SCB", "MEZN"):
+            with self.subTest(bank=bank):
+                self.assertEqual(parser.msgCounts[bank], 1)
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
+        self.assertEqual(parser.msgCounts["ALL"], 5)
+
+        perBucket = sum(
+            parser.msgCounts[bucket]
+            for bucket in ("HBL", "FBL", "SCB", "MEZN", "OTHER", "DUP")
+        )
+        self.assertEqual(parser.msgCounts["ALL"], perBucket)
+
+    def test_no_skips_on_well_formed_mixed_backup(self):
+        """Test method to verify that a backup of well-formed msgs produces no
+        skips at all: a skipped counter climbing on good input would mean a
+        bank's txn signal and its extraction regex disagree.
+        """
+        parser = self._parseBackup(
+            [
+                self._createFblTxnSms(),
+                self._createScbTxnSms(),
+                self._createMeznAtmSms(),
+            ]
+        )
+
+        for counter in ("FBL_SKIPPED", "SCB_SKIPPED", "MEZN_SKIPPED"):
+            with self.subTest(counter=counter):
+                self.assertEqual(parser.msgCounts[counter], 0)
+
+    def test_banks_do_not_claim_each_others_msgs(self):
+        """Test method to verify that the sender short code alone decides the
+        bank: each bank's txn body, sent from *another* bank's short code, is
+        counted against the sending bank and never parsed by the bank whose
+        template it matches.
+        """
+        fblBodyOnScbCode = self._createSms(
+            "7220", self._createFblTxnSms().attrib["body"]
+        )
+        scbBodyOnMeznCode = self._createSms(
+            "8079", self._createScbTxnSms().attrib["body"]
+        )
+        meznBodyOnFblCode = self._createSms(
+            "8756", self._createMeznAtmSms().attrib["body"]
+        )
+
+        parser = self._parseBackup(
+            [fblBodyOnScbCode, scbBodyOnMeznCode, meznBodyOnFblCode]
+        )
+
+        # every msg is attributed to its sender, and none of the three parses:
+        # a bank only ever sees bodies from its own short codes
+        self.assertEqual(parser.msgCounts["SCB"], 1)
+        self.assertEqual(parser.msgCounts["MEZN"], 1)
+        self.assertEqual(parser.msgCounts["FBL"], 1)
+        self.assertEqual(parser.ccTxns, [])
+        self.assertEqual(parser.debitTxns, [])
+
+    def test_retransmitted_txn_msg_yields_one_txn(self):
+        """Test method to verify that a retransmission from the *same* sender
+        still collapses: the identical FBL charge body twice yields one txn,
+        with the second counted as DUP.
+
+        This is the case dedup exists for. An FBL body carries the txn time to
+        the second, so an identical body is provably the same txn — the
+        reference backup contains 41 such retransmissions, two of them arriving
+        hours late.
+        """
+        parser = self._parseBackup(
+            [self._createFblTxnSms(), self._createFblTxnSms()]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 1)
+        self.assertEqual(parser.msgCounts["FBL"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
 
 if __name__ == "__main__":
     # to run this script:

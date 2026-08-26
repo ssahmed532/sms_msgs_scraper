@@ -3,6 +3,28 @@
 A comprehensive audit of the SMS Messages Scraper codebase, covering performance issues,
 Python 3.14 modernization opportunities, bugs, code quality, and test coverage gaps.
 
+> **Status note (2026-08-26).** The multi-bank parser work (FBL, SCB and Meezan; version 1.0.0)
+> resolved some of the items below and changed the context of others. Resolved items are marked
+> **RESOLVED** in place rather than deleted, so the reasoning stays available.
+>
+> - **1c** (duplicate hash computed up to 4x per msg) — RESOLVED: dedup now runs once, before routing.
+> - **5b** (`_updateMonthlyTotals` KeyErrors on an unseeded currency) — RESOLVED, though not via
+>   `defaultdict`: the month is seeded first, then a single `setdefault` + `+=` covers both the
+>   new-month and existing-month paths. The original one-line fix would have missed the case where a
+>   first-seen currency also opens a new month.
+> - **1a** (regex recompiled per call) and **3e** (duplicate `DEFAULT_TZ`) — still open for HBL, but
+>   the three new parsers pre-compile every regex at class level and import `DEFAULT_TZ` from
+>   `common.py`. HBL is now the outlier.
+> - **3b** (`assert` for runtime validation) — still open for HBL, and now explicitly the exception:
+>   the three new bank branches skip + warn + count instead, because those banks have known-malformed
+>   real msgs and an `assert` aborts the whole run.
+> - **6a/6b** (test coverage) — largely addressed: the suite went from 28 to 116 tests.
+>
+> A separate routing bug found and fixed alongside 1c, not listed below: because each `elif` branch
+> re-checked for duplicates as part of its condition, a **duplicate HBL msg failed the HBL branch and
+> fell through the chain into `OTHER`**. Duplicates now land in a dedicated `DUP` bucket, and the
+> identity `ALL == HBL + FBL + SCB + MEZN + OTHER + DUP` is pinned by a test.
+
 ---
 
 ## 1. Performance & Optimization Issues
@@ -74,10 +96,15 @@ def _isSmsDuplicate(self, sms) -> bool:
 
 ---
 
-### 1c. Duplicate hash computed multiple times per message
+### 1c. Duplicate hash computed multiple times per message — **RESOLVED (1.0.0)**
 
 **File:** `sms_backup_file_parser.py:109-128`
 **Severity:** Medium
+
+> **Resolved.** The duplicate check now happens once, before bank routing, essentially as the fix
+> below describes. Two details the fix sketch did not anticipate: duplicates needed their own `DUP`
+> counter (they were falling into `OTHER`), and the per-duplicate body dump had to go — global dedup
+> finds 258 duplicates in a real backup, which was ~1,500 lines of output ahead of any result.
 
 In `parseMessages()`, the `elif` chain calls `self._isSmsDuplicate(child)` independently in
 each branch. If a message is not from HBL, the hash is recomputed when checking FBL, then
@@ -573,10 +600,17 @@ if not address:
 
 ---
 
-### 5b. `_updateMonthlyTotals` doesn't leverage `defaultdict`
+### 5b. `_updateMonthlyTotals` doesn't leverage `defaultdict` — **RESOLVED (1.0.0)**
 
 **File:** `hbl_sms_query_tool.py:74-87`
 **Severity:** Low
+
+> **Resolved**, though deliberately not with `defaultdict`. The month dict is created first, then a
+> single `setdefault(currencyKey, 0.00)` + `+=` handles every case. That matters because the real bug
+> here was not the branching but the `KeyError`: the dict pre-seeds only pkr/cad/usd while the FBL
+> regex accepts any 3-letter currency code, and there were **two** `+=` sites, so a first-seen
+> currency that also opened a new month would still have raised after fixing only the obvious one.
+> Both paths are pinned by tests (`EUR` into an existing month, and `EUR` opening a new month).
 
 `txnsPerMonth` uses `defaultdict(int)` (line 92), but `monthlySpendingTotals` is a plain
 `dict` with manual key-existence checking. This creates unnecessary branching.
