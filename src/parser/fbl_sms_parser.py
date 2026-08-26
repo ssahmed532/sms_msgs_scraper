@@ -18,8 +18,9 @@ class FBLSmsParser:
     #   20-Sep-23 01:17:16 PM at IMTIAZ SUPER MARKET    KARACHI        PK.
     #
     # Two format quirks the RE has to absorb:
-    #   - the spacing around "FBL Card" wobbles between msgs ("your FBL Card  has"
-    #     and "your  FBL Card has" both occur), hence the \s+ on both sides
+    #   - the spacing of the card clause wobbles between msgs: all three of
+    #     "your FBL Card  has", "your  FBL Card has" and "your FBL Card has"
+    #     occur, hence the \s+ on both sides of "FBL Card"
     #   - the txn amount carries NO thousands separators (8100, 18298.9), so the
     #     HBL amount RE — which *requires* comma grouping — cannot be reused here
     FBL_CC_TXN_RE = r"Dear .+?, your\s+FBL Card\s+has been charged for (?P<currency>[A-Z]{3}) (?P<amount>\d+(?:\.\d+)?) on (?P<txndate>\d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} [AP]M|\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}) at (?P<rest>.+?)\.(?:\s*Available Limit: .*)?$"
@@ -30,9 +31,11 @@ class FBLSmsParser:
     #   04-02-2024 21:11:41     (24-hour, numeric month, 4-digit year)
     FBL_TXN_DATE_FMTS = [r"%d-%b-%y %I:%M:%S %p", r"%d-%m-%Y %H:%M:%S"]
 
-    # The txn detail tail is a fixed-width layout: a 22-char vendor column, a
-    # 14-char city column, then a 2-letter country code.
+    # The txn detail tail is a fixed-width layout: a 22-char vendor field, one
+    # separator space, then the city field, then a 2-letter country code.
     VENDOR_COL_WIDTH = 22
+    # Runs of padding spaces are what separates the fixed-width fields.
+    VENDOR_COL_SEP_PTTRN = re.compile(r" {2,}")
 
     @staticmethod
     def isSmsFromFBL(sms: xml.etree.ElementTree.Element) -> bool:
@@ -48,35 +51,57 @@ class FBLSmsParser:
         return False
 
     @staticmethod
+    def _warnSkippedMsg(sms: xml.etree.ElementTree.Element, reason: str) -> None:
+        """Print exactly one warning line for a msg that carries the txn signal
+        but cannot be parsed.
+
+        Deliberately no msg body: the backup is personal financial data, and the
+        received timestamp is enough to locate the offending msg in it.
+        """
+        print(
+            f"WARNING: skipping FBL CC txn msg ({reason}); "
+            f'msg received {sms.attrib.get("readable_date", "?")}'
+        )
+
+    @staticmethod
     def _extractVendor(rest: str) -> str:
         """Pull the vendor name out of the fixed-width vendor/city/country tail
         of an FBL txn msg.
 
-        Some bodies escape an apostrophe with a backslash (M&M\\'S PHARMACY), so
-        the escape chars go first. The columns are normally separated by runs of
-        padding spaces, but a vendor that exactly fills its 22-char column leaves
-        no separator at all (SHUJAAT FILLING STATIO KARACHI        PK) — that
-        case is recovered by slicing the column width instead of splitting.
+        The escape chars go FIRST, and the ordering is load-bearing: some bodies
+        escape an apostrophe with a backslash (M&M\'S PHARMACY), and that
+        backslash is an *extra* character on top of the 22-char vendor field
+        rather than one occupying a column position — measured over the corpus,
+        the city field starts at index 23 of an unescaped tail but at index 24 of
+        an escaped one. Slicing before unescaping would therefore chop the last
+        letter off any escaped vendor that fills its column.
+
+        The fields are normally separated by runs of padding spaces, but a vendor
+        that exactly fills its 22-char field leaves only the single separator
+        space (SHUJAAT FILLING STATIO KARACHI        PK) — that case is recovered
+        by slicing the field width instead of splitting.
         """
         rest = rest.replace("\\", "")
 
-        parts = re.split(r" {2,}", rest)
+        parts = FBLSmsParser.VENDOR_COL_SEP_PTTRN.split(rest)
         if len(parts) >= 3:
             return parts[0].strip()
 
         return rest[: FBLSmsParser.VENDOR_COL_WIDTH].strip()
 
     @staticmethod
-    def _extractCurrencyAndAmount(currency: str, amount: str) -> CurrencyAmountTuple:
+    def _extractCurrencyAndAmount(
+        currency: str, amount: str
+    ) -> CurrencyAmountTuple | None:
         try:
             return CurrencyAmountTuple(currency.strip(), float(amount.strip()))
         except ValueError:
-            print(f"ERROR: unable to parse FBL txn amount into float value: {amount}")
-
-        return None
+            # unreachable for anything the txn RE matched (its amount group is
+            # digits and at most one dot), kept as a belt-and-braces guard
+            return None
 
     @staticmethod
-    def _convertToDateTime(strValue: str) -> datetime:
+    def _convertToDateTime(strValue: str) -> datetime | None:
         for dateFmt in FBLSmsParser.FBL_TXN_DATE_FMTS:
             try:
                 # All timestamps in an SMS backup file are Karachi local time, so
@@ -88,37 +113,37 @@ class FBLSmsParser:
             except ValueError:
                 continue
 
-        print(f"ERROR: unable to parse string into datetime: {strValue}")
-
         return None
 
     @staticmethod
     def extractDetailsFromTxnMsg(sms) -> CreditCardTxnDC | None:
         """Extract the txn details out of an FBL CC txn msg.
 
-        Returns None (after printing a warning) for any msg that carries the
-        txn signal but cannot be parsed — the caller counts those as skipped.
-        No asserts: a single malformed real msg must not abort the whole run.
+        Returns None — after printing exactly one warning line naming the reason
+        — for any msg that carries the txn signal but cannot be parsed; the
+        caller counts those as skipped. No asserts: a single malformed real msg
+        must not abort the whole run.
         """
         m = FBLSmsParser.FBL_CC_TXN_PTTRN.match(sms.attrib["body"].strip())
         if not m:
-            print("ERROR: unable to match FBL CC txn RE against SMS msg")
+            FBLSmsParser._warnSkippedMsg(sms, "body does not match the FBL txn format")
             return None
 
         currencyAndAmount = FBLSmsParser._extractCurrencyAndAmount(
             m.group("currency"), m.group("amount")
         )
         if (currencyAndAmount is None) or (currencyAndAmount.amount <= 0):
-            print("ERROR: unusable currency/amount in FBL CC txn msg")
+            FBLSmsParser._warnSkippedMsg(sms, "unusable txn currency/amount")
             return None
 
         datetimeObj = FBLSmsParser._convertToDateTime(m.group("txndate").strip())
         if datetimeObj is None:
+            FBLSmsParser._warnSkippedMsg(sms, "unparseable txn date")
             return None
 
         vendor = FBLSmsParser._extractVendor(m.group("rest"))
         if not vendor:
-            print("ERROR: no vendor name found in FBL CC txn msg")
+            FBLSmsParser._warnSkippedMsg(sms, "no vendor name in the txn details")
             return None
 
         # FBL txn msgs carry no card digits at all, so the last-four field stays

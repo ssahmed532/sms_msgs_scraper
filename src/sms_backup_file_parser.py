@@ -143,8 +143,9 @@ class SmsBackupFileParser:
                     # assert would abort the entire run over a single bad msg.
                     ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(child)
                     if ccTxn is None:
+                        # the parser already printed one warning line naming the
+                        # reason; this branch only accounts for the skip
                         self.msgCounts["FBL_SKIPPED"] += 1
-                        print("WARNING: skipped an unparseable FBL CC txn msg")
                     else:
                         self.ccVendors.add(ccTxn.vendor)
                         self.ccTxns.append(ccTxn)

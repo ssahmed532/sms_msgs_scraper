@@ -9,8 +9,11 @@ from common import DEFAULT_TZ
 from sms_backup_file_parser import SmsBackupFileParser
 
 # A single well-formed FBL CC txn msg body, reused across the tests. The
-# cardholder name is synthetic; the merchant/city/country columns are shaped
-# exactly as the real corpus (22-char vendor, 14-char city, 2-letter country).
+# cardholder name is synthetic; the merchant names and the fixed-width txn tail
+# come from the real corpus, where the vendor field is 22 chars wide and is
+# followed by a single separator space — so the city starts at index 23 of the
+# tail (index 24 when the vendor carries a backslash escape, which adds one
+# character on top of the field).
 FBL_TXN_BODY = (
     "Dear JOHN DOE, your FBL Card  has been charged for PKR 25170.49 on "
     "20-Sep-23 01:17:16 PM at IMTIAZ SUPER MARKET    KARACHI        PK."
@@ -142,7 +145,7 @@ class TestFBLSmsParser(unittest.TestCase):
             self._txnBody(
                 amount="8100",
                 txnDate="04-02-2024 21:11:41",
-                rest="K ELECTRIC BILL PAY   KARACHI        PK",
+                rest="K ELECTRIC BILL PAY    KARACHI        PK",
             )
         )
 
@@ -173,7 +176,7 @@ class TestFBLSmsParser(unittest.TestCase):
             self._txnBody(
                 currency="USD",
                 amount="39.99",
-                rest="AMAZON.COM            SEATTLE        US",
+                rest="AMAZON.COM             SEATTLE        US",
             )
         )
 
@@ -191,7 +194,7 @@ class TestFBLSmsParser(unittest.TestCase):
                 currency="CAD",
                 amount="12.50",
                 txnDate="15-Mar-24 09:05:00 AM",
-                rest="TIM HORTONS 1234      TORONTO       CA",
+                rest="TIM HORTONS 1234       TORONTO       CA",
             )
         )
 
@@ -219,7 +222,7 @@ class TestFBLSmsParser(unittest.TestCase):
         first of (at least) three parts.
         """
         sms = self._createFblSms(
-            self._txnBody(rest="HYPERSTAR JOHAR TOWN  LAHORE        PK")
+            self._txnBody(rest="HYPERSTAR JOHAR TOWN   LAHORE        PK")
         )
 
         ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(sms)
@@ -241,15 +244,47 @@ class TestFBLSmsParser(unittest.TestCase):
 
     def test_extract_vendor_with_backslash_escape(self):
         """Test method to verify that a vendor name whose apostrophe is
-        backslash-escaped in the msg body comes out unescaped.
+        backslash-escaped in the msg body comes out unescaped. The escape is an
+        extra char on top of the 22-char vendor field, so this tail's city
+        starts at index 24 rather than 23.
         """
         sms = self._createFblSms(
-            self._txnBody(rest="M&M\\'S PHARMACY       KARACHI        PK")
+            self._txnBody(rest="M&M\\'S PHARMACY         KARACHI        PK")
         )
 
         ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(sms)
 
         self.assertEqual(ccTxn.vendor, "M&M'S PHARMACY")
+
+    def test_extract_escaped_vendor_filling_the_whole_column(self):
+        """Test method to verify the one shape that pins the ORDER of the two
+        steps in _extractVendor: an escaped vendor name that also exactly fills
+        its 22-char field takes the column-slice path, and since the backslash
+        is an extra char beyond that field, slicing before unescaping would chop
+        the vendor's last letter off. Two real corpus msgs have this shape.
+        """
+        sms = self._createFblSms(
+            self._txnBody(rest="AUNTIE MANAVER\\'S DESSE KARACHI        PK")
+        )
+
+        ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(sms)
+
+        self.assertEqual(ccTxn.vendor, "AUNTIE MANAVER'S DESSE")
+
+    def test_extract_vendor_split_wins_over_column_slice(self):
+        """Test method to guard the padding-split branch itself: a vendor name
+        short enough that its city field starts well before index 22 makes the
+        two extraction rules disagree — the split yields the vendor alone, while
+        the column-width slice would swallow the city too. Synthetic on purpose:
+        no corpus body disagrees today (all 583 real tails start the city at
+        index 23, or 24 when escaped), so this pins the documented rule rather
+        than observed data.
+        """
+        sms = self._createFblSms(self._txnBody(rest="QUICK MART   LAHORE   PK"))
+
+        ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(sms)
+
+        self.assertEqual(ccTxn.vendor, "QUICK MART")
 
     def test_no_card_digits_in_msg(self):
         """Test method to verify that ccLastFourDigits stays 0: FBL txn msgs
@@ -302,20 +337,30 @@ class TestFBLSmsParser(unittest.TestCase):
         self.assertIsNone(FBLSmsParser.extractDetailsFromTxnMsg(sms))
 
     #
-    # name-clause whitespace wobble
+    # card-clause whitespace wobble
     #
 
-    def test_name_clause_wobble_double_space_after_card(self):
-        """Test method to verify the "your FBL Card  has" spacing parses."""
-        sms = self._createFblSms(self._txnBody(cardClause="your FBL Card  has"))
+    def test_card_clause_whitespace_variants_all_parse(self):
+        """Test method to verify that all three card-clause spacings found in
+        the corpus parse identically: "your FBL Card  has", "your  FBL Card has"
+        and the single-spaced "your FBL Card has".
+        """
+        for cardClause in (
+            "your FBL Card  has",
+            "your  FBL Card has",
+            "your FBL Card has",
+        ):
+            with self.subTest(cardClause=cardClause):
+                sms = self._createFblSms(self._txnBody(cardClause=cardClause))
 
-        self.assertIsNotNone(FBLSmsParser.extractDetailsFromTxnMsg(sms))
+                ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(sms)
 
-    def test_name_clause_wobble_double_space_before_card(self):
-        """Test method to verify the "your  FBL Card has" spacing parses."""
-        sms = self._createFblSms(self._txnBody(cardClause="your  FBL Card has"))
-
-        self.assertIsNotNone(FBLSmsParser.extractDetailsFromTxnMsg(sms))
+                self.assertIsNotNone(ccTxn)
+                self.assertEqual(ccTxn.vendor, "IMTIAZ SUPER MARKET")
+                self.assertEqual(ccTxn.amountTuple.amount, 25170.49)
+                self.assertEqual(
+                    ccTxn.date, datetime(2023, 9, 20, 13, 17, 16, tzinfo=DEFAULT_TZ)
+                )
 
     #
     # skip path
