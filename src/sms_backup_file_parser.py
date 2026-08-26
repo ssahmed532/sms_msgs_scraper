@@ -4,14 +4,11 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from parser.fbl_sms_parser import FBLSmsParser
 from parser.hbl_sms_parser import HBLSmsParser
+from parser.mezn_sms_parser import MeznSmsParser
 from parser.scb_sms_parser import SCBSmsParser
 
 
 class SmsBackupFileParser:
-
-    # SMS messages from these short codes will be assumed to be from
-    # Meezan Bank
-    MEZN_SHORT_CODES = ["8079", "9779"]
 
     @staticmethod
     def calcSmsMsgHash(sms: xml.etree.ElementTree.Element) -> str:
@@ -162,8 +159,27 @@ class SmsBackupFileParser:
                     else:
                         self.ccVendors.add(ccTxn.vendor)
                         self.ccTxns.append(ccTxn)
-            elif child.attrib["address"] in self.MEZN_SHORT_CODES:
-                self.msgCounts["MEZN"] += 1
+            elif MeznSmsParser.isSmsFromMezn(child):
+                self.msgCounts[MeznSmsParser.ID] += 1
+
+                if MeznSmsParser.isMsgDebitTxn(child):
+                    debitTxn = MeznSmsParser.extractDetailsFromTxnMsg(child)
+                    if debitTxn:
+                        self.debitVendors.add(debitTxn.vendor)
+                        self.debitTxns.append(debitTxn)
+                    else:
+                        # MEZN_SKIPPED is reachable two ways, both ending as an
+                        # extraction of None: (a) the keyword signal passes but
+                        # no template regex matches — i.e. Meezan changed a
+                        # template, which is exactly what the independent
+                        # signal exists to surface; and (b) the date regex
+                        # accepts a token strptime rejects (e.g. 31-Feb-25).
+                        # The parser has already printed one warning line
+                        # naming the reason and the msg's received date, so
+                        # counting is all that is left to do here — and never
+                        # asserting: an assert would abort the whole run over
+                        # one bad msg.
+                        self.msgCounts["MEZN_SKIPPED"] += 1
             else:
                 self.msgCounts["OTHER"] += 1
 
