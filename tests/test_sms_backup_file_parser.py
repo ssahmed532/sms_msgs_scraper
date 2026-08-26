@@ -200,10 +200,15 @@ class TestSmsBackupFileParser(unittest.TestCase):
         self.assertEqual(parser.msgCounts["DUP"], 1)
         self.assertEqual(parser.msgCounts["ALL"], 2)
 
-    def test_cross_sender_duplicate_counted_as_dup(self):
-        """Test method to verify (and pin) the cross-sender consequence of
-        body-only hashing: an identical body relayed by a second, different
-        sender counts as DUP rather than as a msg from that sender.
+    def test_identical_body_from_two_senders_is_not_a_duplicate(self):
+        """Test method to verify that dedup never reaches across senders: the
+        sender short code is part of the msg identity, so an unrelated msg
+        cannot suppress a later bank msg that merely repeats its text.
+
+        This used to fail. Hashing the body alone made dedup cross-sender, and
+        because the check runs before routing, the bank msg was discarded before
+        anything knew which bank it came from — 23 msgs on the reference backup,
+        4 of them from bank short codes.
         """
         parser = self._parseBackup(
             [
@@ -213,8 +218,28 @@ class TestSmsBackupFileParser(unittest.TestCase):
         )
 
         self.assertEqual(parser.msgCounts["OTHER"], 1)
-        self.assertEqual(parser.msgCounts["SCB"], 0)
-        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["SCB"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
+
+    def test_cross_sender_identical_txn_body_still_parses(self):
+        """Test method to verify the same thing where it costs money: a bank
+        txn msg whose body was already seen from another sender must still be
+        parsed into a txn, not silently dropped.
+        """
+        txnBody = self._createHblTxnSms().attrib["body"]
+
+        parser = self._parseBackup(
+            [
+                # an unrelated sender relaying the same text first
+                self._createSms("1234", txnBody),
+                self._createHblTxnSms(),
+            ]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 1)
+        self.assertEqual(parser.msgCounts["HBL"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
 
     # ------------------------------------------------------------------
     # Mixed-bank integration cases. These need all four parsers to exist,
@@ -354,10 +379,15 @@ class TestSmsBackupFileParser(unittest.TestCase):
         self.assertEqual(parser.ccTxns, [])
         self.assertEqual(parser.debitTxns, [])
 
-    def test_identical_bodies_across_banks_collapse_to_one_txn(self):
-        """Test method to verify (and pin) the cross-sender reach of body-only
-        hashing where it actually costs a txn: the same FBL charge body sent
-        twice yields one txn, with the second counted as DUP.
+    def test_retransmitted_txn_msg_yields_one_txn(self):
+        """Test method to verify that a retransmission from the *same* sender
+        still collapses: the identical FBL charge body twice yields one txn,
+        with the second counted as DUP.
+
+        This is the case dedup exists for. An FBL body carries the txn time to
+        the second, so an identical body is provably the same txn — the
+        reference backup contains 41 such retransmissions, two of them arriving
+        hours late.
         """
         parser = self._parseBackup(
             [self._createFblTxnSms(), self._createFblTxnSms()]

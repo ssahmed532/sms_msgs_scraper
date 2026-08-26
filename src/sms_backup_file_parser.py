@@ -20,24 +20,51 @@ class SmsBackupFileParser:
         Returns:
             str: the cryptographic hash of the SMS msg in hex format
         """
-        # to be completely correct, the hash of a msg *SHOULD* include:
-        #   - the sender short code
-        #   - the contents of the msg (body)
-        #   - the date/timestamp it was received (or sent!)
+        # The identity is (sender short code, stripped body). The sender is
+        # part of it because dedup would otherwise reach across senders: an
+        # unrelated msg could suppress a later bank msg that merely happened to
+        # repeat its text. On the reference backup that silently discarded 23
+        # msgs, 4 of them from bank short codes.
         #
-        # Known limitations of hashing the (stripped) body alone:
-        #   - dedup is cross-sender: two senders relaying an identical body
-        #     collapse into one msg, and the second one counts as a duplicate
-        #     rather than a msg from its own sender
-        #   - two legitimate identical purchases (same vendor, amount and date)
-        #     collapse into a single txn
+        # A received timestamp is deliberately NOT part of the identity, even
+        # though a duplicate is by definition received later. Measured on the
+        # reference backup, both candidate timestamps fail as a
+        # retransmission/distinct-txn discriminator:
+        #   - `date` (received): the network redelivers the *same* alert as much
+        #     as 2.9 hours late. Two FBL retransmissions arrived 19 minutes and
+        #     2.9 hours after their originals, and their bodies carry the txn
+        #     time to the second — so they are provably the same txn. Any
+        #     "within N minutes" window short enough to be meaningful would have
+        #     admitted them as second purchases and inflated the totals.
+        #   - `date_sent`: differs on 138 of the 145 repeated (sender, body)
+        #     groups, including those same provably-identical FBL txns. Adding
+        #     it to the identity would disable dedup almost entirely.
+        # Fabricating spending is worse than the residual below, so the identity
+        # stays with what the msg *says* rather than when it arrived.
+        #
+        # Residual limitations, in order of how much they matter:
+        #   - FBL and Meezan bodies carry a time of day (to the second and to
+        #     the minute respectively), so an identical body means the same txn
+        #     and dedup is exact for them.
+        #   - HBL and SCB bodies carry a *date only*. Two genuinely distinct
+        #     identical purchases (same card, vendor, amount and day) are
+        #     therefore indistinguishable from a retransmission, and collapse
+        #     into one txn. On the reference backup this affects at most 3 msgs
+        #     (2 HBL, 1 SCB) whose repeats arrived 1.5-6 minutes apart; the
+        #     other repeats arrived within 8 seconds and are plainly
+        #     retransmissions. This is a limit of what the SMS says, not of the
+        #     dedup rule.
         #   - only leading/trailing whitespace is normalized here, while the
         #     Meezan parser also collapses *internal* whitespace runs before
         #     matching: two Meezan bodies differing only in internal spacing
         #     hash differently and both parse. Real duplicates are byte-identical
         #     retransmissions, so this is acceptable in practice.
+        msgSender = sms.attrib["address"]
         msgBody = sms.attrib["body"].strip()
-        sha256Hash = hashlib.sha3_512(msgBody.encode("utf-8")).hexdigest()
+        # the separator cannot occur in a short code, so no (sender, body) pair
+        # can be confused with another by concatenation
+        msgIdentity = f"{msgSender}\x00{msgBody}"
+        sha256Hash = hashlib.sha3_512(msgIdentity.encode("utf-8")).hexdigest()
         return sha256Hash
 
     def printSmsMsg(sms: xml.etree.ElementTree.Element) -> None:
@@ -69,15 +96,18 @@ class SmsBackupFileParser:
         assert self.expectedMsgs > 0
 
     def _isSmsDuplicate(self, sms: xml.etree.ElementTree.Element) -> bool:
-        """Report whether this msg's body has already been seen, recording it
-        if not.
+        """Report whether this msg has already been seen *from this sender*,
+        recording it if not.
 
-        Deliberately silent: with dedup applied globally (rather than per bank
-        branch) a real backup yields hundreds of duplicates — mostly
-        retransmitted promotional msgs from non-bank senders — and dumping the
-        original/duplicate body pair for each one buried the actual command
-        output under ~1,500 lines of noise. The DUP summary line carries the
-        signal instead.
+        Because the sender is part of the identity (see `calcSmsMsgHash`), a msg
+        can only ever be suppressed by an earlier msg from the same short code —
+        checking before routing cannot discard another sender's msg.
+
+        Deliberately silent: a real backup yields hundreds of duplicates —
+        mostly retransmitted promotional msgs from non-bank senders — and
+        dumping the original/duplicate body pair for each one buried the actual
+        command output under ~1,500 lines of noise. The DUP summary line carries
+        the signal instead.
         """
         hash = SmsBackupFileParser.calcSmsMsgHash(sms)
 
