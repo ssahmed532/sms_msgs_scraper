@@ -153,13 +153,12 @@ class SmsBackupFileParser:
                         # template, which is exactly what the independent
                         # signal exists to surface; and (b) the date regex
                         # accepts a token strptime rejects (e.g. 31-Feb-25).
-                        # Skip + warn + count, never assert: an assert here
-                        # would abort the whole run over one bad msg.
+                        # The parser has already printed one warning line
+                        # naming the reason and the msg's received date, so
+                        # counting is all that is left to do here — and never
+                        # asserting: an assert would abort the whole run over
+                        # one bad msg.
                         self.msgCounts["MEZN_SKIPPED"] += 1
-                        print(
-                            "WARNING: skipped an unparseable Meezan debit msg "
-                            f'received on {child.attrib.get("readable_date", "?")}'
-                        )
             else:
                 self.msgCounts["OTHER"] += 1
 

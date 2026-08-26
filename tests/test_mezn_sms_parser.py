@@ -137,6 +137,7 @@ class TestMeznSmsParser(unittest.TestCase):
 
         self.assertEqual(txn.txnType, DebitTxnType.ATM_WITHDRAWAL)
         self.assertEqual(txn.vendor, "KHAYABAN-E-SEHAR KHI")
+        self.assertEqual(txn.amountTuple.currency, "PKR")
         self.assertEqual(txn.amountTuple.amount, 35000.00)
         self.assertEqual(txn.acctMask, "xxxxxx5602")
         self.assertEqual(
@@ -153,6 +154,7 @@ class TestMeznSmsParser(unittest.TestCase):
 
         self.assertEqual(txn.txnType, DebitTxnType.ACCOUNT_DEBIT)
         self.assertEqual(txn.vendor, "NAYAPAY - Load Wallet")
+        self.assertEqual(txn.amountTuple.currency, "PKR")
         self.assertEqual(txn.amountTuple.amount, 1000.00)
         self.assertEqual(txn.acctMask, "xxxxxx5602")
         self.assertEqual(
@@ -171,6 +173,7 @@ class TestMeznSmsParser(unittest.TestCase):
         self.assertEqual(
             txn.vendor, "KARACHI GRAMMAR SCHOOL SCB-5504000000015496"
         )
+        self.assertEqual(txn.amountTuple.currency, "PKR")
         self.assertEqual(txn.amountTuple.amount, 63100.00)
         self.assertEqual(txn.acctMask, "xxxxxx5602")
         self.assertEqual(
@@ -187,6 +190,7 @@ class TestMeznSmsParser(unittest.TestCase):
 
         self.assertEqual(txn.txnType, DebitTxnType.FUNDS_TRANSFER)
         self.assertEqual(txn.vendor, "JOHN DOE MBL- 01130100000267")
+        self.assertEqual(txn.amountTuple.currency, "PKR")
         self.assertEqual(txn.amountTuple.amount, 5000.00)
         self.assertEqual(txn.acctMask, "")
         self.assertEqual(
@@ -266,15 +270,14 @@ class TestMeznSmsParser(unittest.TestCase):
 
     def test_uppercase_funds_transfer_with_mbl_payee(self):
         """Test method to verify the real '(MBL AC …)' payee form, which the
-        bank sends with an uppercase 'SENT TO'.
+        bank sends with an uppercase 'SENT TO' but which *does* carry an
+        account clause.
 
-        Because the lowercase transfer template is deliberately
-        case-sensitive, this body falls through to the uppercase template,
-        whose payee capture runs all the way to the date — so the trailing
-        account clause ends up inside the payee and acctMask stays empty.
-        That is the behaviour the corpus ground truth (410 transfers /
-        189 unique vendors) was measured against, so it is pinned here rather
-        than silently "fixed".
+        The transfer template matches 'sent to' case-insensitively precisely
+        so that this form is claimed by it rather than by the account-less
+        fallback template — whose payee capture would otherwise run to the
+        date, swallowing the account clause into the payee and leaving
+        acctMask empty.
         """
         txn = MeznSmsParser.extractDetailsFromTxnMsg(
             self._createMeznSms(
@@ -285,11 +288,8 @@ class TestMeznSmsParser(unittest.TestCase):
         )
 
         self.assertEqual(txn.txnType, DebitTxnType.FUNDS_TRANSFER)
-        self.assertEqual(
-            txn.vendor,
-            "JOHN DOE (MBL AC 0113xxxxxx0267) from your A/C xxxxxx5602",
-        )
-        self.assertEqual(txn.acctMask, "")
+        self.assertEqual(txn.vendor, "JOHN DOE (MBL AC 0113xxxxxx0267)")
+        self.assertEqual(txn.acctMask, "xxxxxx5602")
 
     def test_raast_funds_transfer_account_spelling(self):
         """Test method to verify the RAAST 'AC#' spelling of the account
@@ -306,6 +306,23 @@ class TestMeznSmsParser(unittest.TestCase):
         self.assertEqual(txn.txnType, DebitTxnType.FUNDS_TRANSFER)
         self.assertEqual(txn.vendor, "L.FOODS AC# PK......2413 as RAAST payment")
         self.assertEqual(txn.acctMask, "xxxxxx5602")
+
+    def test_doubled_space_inside_vendor_normalized(self):
+        """Test method to verify that runs of whitespace inside a msg body are
+        collapsed before matching, so the captured vendor is single-spaced.
+
+        Without that normalization the doubled space survives into the vendor
+        string and the same payee/ATM shows up as two distinct vendors.
+        """
+        txn = MeznSmsParser.extractDetailsFromTxnMsg(
+            self._createMeznSms(
+                "PKR 35,000.00 cash withdrawn from KHAYABAN-E-SEHAR  KHI from "
+                "A/C xxxxxx5602 KHAYABAN-E-SEHAR KHI on 19-Sep-23 at 19:42 "
+                "TID:720564"
+            )
+        )
+
+        self.assertEqual(txn.vendor, "KHAYABAN-E-SEHAR KHI")
 
     #
     # trailing junk after the date varies a lot and must not matter

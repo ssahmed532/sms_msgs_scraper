@@ -60,23 +60,25 @@ class MeznSmsParser:
             ),
         ),
         (
-            # "sent to" is deliberately case-sensitive here: the uppercase
-            # "SENT TO" family below carries no account clause at all and is
-            # matched by its own pattern. The A/?C#? spelling covers both the
-            # regular "A/C" and the RAAST "AC#" variants, and the optional
-            # " of {branch}" clause is absent in the "(MBL AC #xxx#)" payee
-            # variant.
+            # "sent to" is matched case-insensitively: the "(MBL AC ...)" payee
+            # form is sent with an uppercase "SENT TO" but still carries an
+            # account clause, so a case-sensitive match here would push those
+            # bodies down to the account-less family below, which would swallow
+            # the account clause into the payee and leave acctMask empty. The
+            # A/?C#? spelling covers both the regular "A/C" and the RAAST "AC#"
+            # variants, and the " of {branch}" clause is optional because the
+            # "(MBL AC ...)" form omits it.
             DebitTxnType.FUNDS_TRANSFER,
             re.compile(
                 MEZN_AMOUNT_RE
-                + r" sent to (?P<vendor>.+?) "
+                + r"(?i: sent to )(?P<vendor>.+?) "
                 + r"from your A/?C#? (?P<acmask>\S+)(?: of .+?)? "
                 + MEZN_DATE_RE
             ),
         ),
         (
-            # Uppercase transfer notices carry no account number, so acctMask
-            # stays empty for these.
+            # The fallback for transfer notices that carry no account clause at
+            # all (uppercase only), so acctMask stays empty for these.
             DebitTxnType.FUNDS_TRANSFER,
             re.compile(
                 MEZN_AMOUNT_RE + r" SENT TO (?P<vendor>.+?) " + MEZN_DATE_RE
@@ -102,8 +104,9 @@ class MeznSmsParser:
     # The formats of the txn date+time in Meezan debit SMS msgs:
     #   28-Sep-23 19:42     (2-digit year; the original format)
     #   28-Apr-2025 9:05    (4-digit year; appeared around Apr 2025)
-    # The 2-digit format must be tried first: strptime's %Y also accepts a
-    # 2-digit year, and would silently read "25-Aug-25" as the year 25.
+    # Either order works: strptime's %Y matches exactly 4 digits and %y
+    # exactly 2, so the two formats are mutually exclusive — neither can
+    # mis-read the other's year.
     MEZN_TXN_DATETIME_FMTS = ("%d-%b-%y %H:%M", "%d-%b-%Y %H:%M")
 
     @staticmethod
@@ -203,6 +206,10 @@ class MeznSmsParser:
                         raised — a malformed msg must not abort a whole run.
         """
         msgBody = MeznSmsParser._normalizeWhitespace(sms.attrib["body"])
+        # Warnings identify the msg by the date it was received, never by its
+        # body: a Meezan debit body carries the payee, the account mask and the
+        # running balance.
+        receivedOn = sms.attrib.get("readable_date", "?")
 
         for txnType, pattern in MeznSmsParser.MEZN_DEBIT_TXN_PTTRNS:
             m = pattern.match(msgBody)
@@ -213,7 +220,7 @@ class MeznSmsParser:
                 m.group("currency"), m.group("amount")
             )
             if (not currencyAndAmount.currency) or (currencyAndAmount.amount <= 0):
-                print(f"ERROR: bad amount in Meezan debit msg: {msgBody}")
+                print(f"ERROR: bad amount in Meezan debit msg received on {receivedOn}")
                 return None
 
             datetimeObj = MeznSmsParser._convertToDateTime(
@@ -224,7 +231,7 @@ class MeznSmsParser:
 
             vendor = m.group("vendor").strip()
             if not vendor:
-                print(f"ERROR: empty vendor in Meezan debit msg: {msgBody}")
+                print(f"ERROR: empty vendor in Meezan debit msg received on {receivedOn}")
                 return None
 
             # The uppercase transfer template has no account clause at all.
@@ -240,6 +247,9 @@ class MeznSmsParser:
                 acctMask=acctMask,
             )
 
-        print(f"ERROR: unable to match any Meezan debit template against msg: {msgBody}")
+        print(
+            "ERROR: unable to match any Meezan debit template against msg "
+            f"received on {receivedOn}"
+        )
 
         return None
