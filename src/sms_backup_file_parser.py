@@ -3,6 +3,7 @@ import xml
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from parser.hbl_sms_parser import HBLSmsParser
+from parser.scb_sms_parser import SCBSmsParser
 
 
 class SmsBackupFileParser:
@@ -10,10 +11,6 @@ class SmsBackupFileParser:
     # SMS messages from these short codes will be assumed to be from
     # Faysal Bank
     FBL_SHORT_CODES = ["8756"]
-
-    # SMS messages from these short codes will be assumed to be from
-    # Standard Chartered Bank
-    SCB_SHORT_CODES = ["7220"]
 
     # SMS messages from these short codes will be assumed to be from
     # Meezan Bank
@@ -139,8 +136,21 @@ class SmsBackupFileParser:
                     self.ccTxns.append(ccTxn)
             elif child.attrib["address"] in self.FBL_SHORT_CODES:
                 self.msgCounts["FBL"] += 1
-            elif child.attrib["address"] in self.SCB_SHORT_CODES:
-                self.msgCounts["SCB"] += 1
+            elif SCBSmsParser.isSmsFromSCB(child):
+                self.msgCounts[SCBSmsParser.ID] += 1
+
+                if SCBSmsParser.isMsgCreditCardTxn(child):
+                    # No asserts here, unlike the HBL branch: SCB really does
+                    # send unusable txn msgs (truncated mid-body, or carrying
+                    # no amount at all), and an assert would abort the whole
+                    # run over them. Skip + warn + count instead.
+                    ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(child)
+                    if ccTxn is None:
+                        self.msgCounts["SCB_SKIPPED"] += 1
+                        print("WARNING: skipped an unparseable SCB CC txn msg")
+                    else:
+                        self.ccVendors.add(ccTxn.vendor)
+                        self.ccTxns.append(ccTxn)
             elif child.attrib["address"] in self.MEZN_SHORT_CODES:
                 self.msgCounts["MEZN"] += 1
             else:
