@@ -63,6 +63,30 @@ uv run src/hbl_sms_query_tool.py backup.xml list_all_cc_txns --bank FBL
 uv run src/hbl_sms_query_tool.py backup.xml list_all_debit_txns --txn-type atm_withdrawal
 ```
 
+### Verifying against a real backup
+```bash
+# assert the parsers against the reference backup (repo root, gitignored)
+uv run scripts/verify_against_backup.py
+
+# ...or against any other backup
+uv run scripts/verify_against_backup.py path/to/sms-backup.xml
+```
+
+Run this after **any** change to a parser, to the routing in `SmsBackupFileParser`, or to the dedup
+identity. The unit suite proves the parsers work on hand-built msgs; this proves they still work on
+~4,700 real ones, which is where a regex change that passes every unit test quietly loses 40 txns
+shows up.
+
+It separates two kinds of check. **Invariants** hold for any backup and are always asserted: the
+conservation identity, plus every txn having a non-empty vendor, a positive amount, a tz-aware
+Asia/Karachi date, a known bank and a known debit type. **Expected counts** are tied to one backup
+file by its SHA-256 — asserted exactly against that file, and merely reported against any other,
+since they cannot mean anything there. Output is counts only; the parsers' own per-msg warnings are
+captured and reported as a line count, because a backup is personal financial data.
+
+If an expected count misses, see the Anti-drift rule in the script's docstring: fix the code, or
+re-derive the expectation and record the derivation — never edit the number to match the output.
+
 ### Dependency Management
 ```bash
 uv sync                 # install/refresh .venv from uv.lock
@@ -100,6 +124,8 @@ sms_msgs_scraper/
 │   │   ├── scb_sms_parser.py     # Standard Chartered CC txn parsing
 │   │   └── mezn_sms_parser.py    # Meezan Bank account debit parsing
 │   └── IMPROVEMENTS.md           # Codebase audit doc with known issues
+├── scripts/
+│   └── verify_against_backup.py  # Asserts the parsers against a real backup (counts only)
 └── tests/
     ├── test_hbl_sms_parser.py         # HBL parser identification + extraction
     ├── test_fbl_sms_parser.py         # FBL parser + its end-to-end backup cases

@@ -83,7 +83,14 @@ uv run src/hbl_sms_query_tool.py backup.xml list_all_debit_txns \
 ```bash
 # run the test suite (from src/ — imports resolve relative to it)
 cd src && uv run python -m unittest discover -s ../tests/ -v
+
+# verify the parsers against a real backup file
+uv run scripts/verify_against_backup.py [backup.xml]
 ```
+
+The test suite covers hand-built messages; `verify_against_backup.py` covers a whole real backup,
+and is worth running after any change to a parser or to message routing. It reports counts only,
+never message contents.
 
 `CLAUDE.md` documents the architecture, the message formats each parser handles, the reference
 transaction counts to gate changes against, and the known limitations.
