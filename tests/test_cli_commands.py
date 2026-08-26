@@ -56,6 +56,33 @@ class TestCliCommandRegistration(unittest.TestCase):
 
         self.assertEqual(reported.group(1), projectVersion)
 
+    def test_lockfile_version_matches_project_metadata(self):
+        """Test method to verify that uv.lock carries the same version as
+        pyproject.toml.
+
+        This tool follows semantic versioning, and the number is declared in
+        three places: the CLI, pyproject.toml and uv.lock. The test above pins
+        the first two; this one pins the third, which is the one that gets
+        forgotten — `uv lock` has to be re-run after a bump, and nothing about
+        editing pyproject.toml prompts for it.
+        """
+        pyprojectPath = Path(__file__).parent.parent / "pyproject.toml"
+        pyproject = tomllib.loads(pyprojectPath.read_text(encoding="utf-8"))
+        projectName = pyproject["project"]["name"]
+        projectVersion = pyproject["project"]["version"]
+
+        lockPath = Path(__file__).parent.parent / "uv.lock"
+        lockedPackages = tomllib.loads(lockPath.read_text(encoding="utf-8"))["package"]
+        lockedProject = next(
+            package for package in lockedPackages if package["name"] == projectName
+        )
+
+        self.assertEqual(
+            lockedProject["version"],
+            projectVersion,
+            "uv.lock is stale — re-run `uv lock` after bumping the version",
+        )
+
     def _optionNames(self, commandName: str) -> set:
         return {param.name for param in cli.commands[commandName].params}
 

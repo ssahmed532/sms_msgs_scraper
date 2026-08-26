@@ -14,7 +14,34 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 1.0.0 — declared in **two** places that must agree: `@click.version_option` in `sms_txn_query_tool.py` and `[project].version` in `pyproject.toml` (which `uv.lock` also carries). A test pins them equal, because they had already drifted apart once.
+**Version:** 1.1.0.
+
+**This tool MUST follow [semantic versioning](https://semver.org/).** Every change that ships is
+released under a version number chosen by what it does to someone already using the tool, never by
+how large the diff was:
+
+- **MAJOR** — an existing invocation stops working or starts meaning something else: a command or
+  option renamed or removed, an option's accepted values narrowed, a default that changes which
+  txns come back.
+- **MINOR** — new capability, every existing invocation unaffected: a new command, a new option, a
+  new bank parser, a reworked presentation of the same data.
+- **PATCH** — a fix with no new capability: a parser corrected, a miscount, a crash.
+
+Judge it from the outside. A rewrite that leaves every command behaving identically is a PATCH or
+nothing at all; a one-line new option is a MINOR. Output that a script could be parsing counts as
+interface — a changed default that drops lines from a command's output is at least MINOR, and worth
+calling out in the commit message either way.
+
+The number lives in **three** places that must agree, and bumping means bumping all three:
+
+1. `@click.version_option` in `sms_txn_query_tool.py`
+2. `[project].version` in `pyproject.toml`
+3. `uv.lock` — refreshed by re-running `uv lock`, never hand-edited
+
+All three are pinned by tests — `test_cli_version_matches_project_metadata` for the first two
+(they had already drifted apart once) and `test_lockfile_version_matches_project_metadata` for the
+lockfile, which is the one that gets forgotten: nothing about editing `pyproject.toml` prompts you
+to re-run `uv lock`.
 
 ## Development Commands
 

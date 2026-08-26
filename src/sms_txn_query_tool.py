@@ -78,7 +78,7 @@ click.rich_click.COMMAND_GROUPS = {
 
 
 @click.group()
-@click.version_option("1.0.0", prog_name="sms_txn_query_tool")
+@click.version_option("1.1.0", prog_name="sms_txn_query_tool")
 @click.argument(
     "filepath",
     type=click.Path(
