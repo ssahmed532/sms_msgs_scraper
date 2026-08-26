@@ -242,6 +242,10 @@ class TestSCBSmsParser(unittest.TestCase):
             "SOUTH CITY HOSPITALKarachi PAK",
             "Amazon.caAMAZON.CA CAN",
             "SHELL (SUNSET BOULEVAR KARACHI PAK",
+            # a vendor containing the " on " that separates the vendor from
+            # the txn date: the whole vendor must survive, not just the text
+            # ahead of the first " on "
+            "CAFE on THE GO Karachi PAK",
         ]:
             with self.subTest(vendor=vendor):
                 ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
@@ -249,6 +253,42 @@ class TestSCBSmsParser(unittest.TestCase):
                 )
 
                 self.assertEqual(ccTxn.vendor, vendor)
+
+    def test_extractDetailsFromTxnMsg_takes_the_first_txn_in_the_body(self):
+        """Test method to verify that a body carrying two concatenated txn
+        alerts yields the *first* txn, i.e. the one the leading amount
+        belongs to.
+
+        The vendor capture is deliberately lazy. On every well-formed body in
+        the validated corpus a greedy capture behaves identically (there is
+        only one date/card tail to anchor on), so this concatenated shape —
+        which the SMS pipeline can produce, as the 21 truncated bodies show
+        it already mangles these msgs — is what pins the choice: a greedy
+        capture would pair the first amount with the *second* msg's vendor,
+        date and card, inventing a txn that never happened.
+        """
+        firstTxn = SCB_TXN_MSG_TEMPLATE.format(
+            amount="100.00",
+            vendor="FIRST SHOP Karachi PAK",
+            txnDate="01-02-24",
+            cardMask="5452xxxxxxxx1280",
+        )
+        secondTxn = SCB_TXN_MSG_TEMPLATE.format(
+            amount="200.00",
+            vendor="SECOND SHOP Lahore PAK",
+            txnDate="03-04-24",
+            cardMask="5452xxxxxxxx9999",
+        )
+
+        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
+            self._createScbSms(firstTxn + " " + secondTxn)
+        )
+
+        self.assertIsNotNone(ccTxn)
+        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("PKR", 100.00))
+        self.assertEqual(ccTxn.vendor, "FIRST SHOP Karachi PAK")
+        self.assertEqual(ccTxn.date, datetime(2024, 2, 1, tzinfo=DEFAULT_TZ))
+        self.assertEqual(ccTxn.ccLastFourDigits, 1280)
 
     # ------------------------------------------------------------------ skip paths
 

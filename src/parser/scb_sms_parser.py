@@ -1,5 +1,5 @@
 import re
-import xml
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
@@ -34,11 +34,11 @@ class SCBSmsParser:
     SCB_TXN_DATE_FMT = r"%d-%m-%y"
 
     @staticmethod
-    def isSmsFromSCB(sms: xml.etree.ElementTree.Element) -> bool:
+    def isSmsFromSCB(sms: ET.Element) -> bool:
         return sms.attrib["address"] in SCBSmsParser.SCB_SHORT_CODES
 
     @staticmethod
-    def isMsgCreditCardTxn(sms: xml.etree.ElementTree.Element) -> bool:
+    def isMsgCreditCardTxn(sms: ET.Element) -> bool:
         """Report whether this msg looks like a CC txn *attempt*.
 
         Deliberately looser than the extraction regex, and deliberately keyed
@@ -52,15 +52,28 @@ class SCBSmsParser:
         return "have been paid at" in sms.attrib["body"]
 
     @staticmethod
+    def _warnSkippedMsg(sms: ET.Element, reason: str) -> None:
+        """Print exactly one warning line for a msg that cannot be parsed.
+
+        The msg is identified by its readable_date rather than by its body: a
+        backup is personal financial data, and a real run skips 26 SCB msgs,
+        which would mean dumping 26 real messages to stdout. The received
+        date is enough to locate the msg in the backup file. .attrib.get() so
+        that a backup missing the attribute cannot make the warning itself
+        raise.
+        """
+        receivedAt = sms.attrib.get("readable_date", "?")
+        print(f"WARNING: skipping SCB msg received {receivedAt}: {reason}")
+
+    @staticmethod
     def _extractCurrencyAndAmount(currency: str, amount: str) -> CurrencyAmountTuple:
         try:
             return CurrencyAmountTuple(
                 currency.strip(), float(amount.strip().replace(",", ""))
             )
         except ValueError:
-            print(f"ERROR: unable to parse txn amount into float value: {amount}")
-
-        return None
+            # the caller emits the single warning line for this msg
+            return None
 
     @staticmethod
     def _extractCardLastFourDigits(cardMask: str) -> int:
@@ -88,23 +101,26 @@ class SCBSmsParser:
                 strValue, SCBSmsParser.SCB_TXN_DATE_FMT
             ).replace(tzinfo=DEFAULT_TZ)
         except ValueError:
-            print(f"ERROR: unable to parse string into datetime: {strValue}")
+            # the caller emits the single warning line for this msg
+            pass
 
         return datetimeObj
 
     @staticmethod
-    def extractDetailsFromTxnMsg(sms: xml.etree.ElementTree.Element) -> CreditCardTxnDC:
+    def extractDetailsFromTxnMsg(sms: ET.Element) -> CreditCardTxnDC:
         """Extract the txn details out of an SCB CC txn msg.
 
-        Returns None (after printing one warning line) for any msg the txn
-        regex does not match — truncated bodies and "PKR .00" amounts land
-        here by design, and the caller counts them as skipped.
+        Returns None — after printing exactly one warning line naming the
+        reason and the msg's received date — for any msg that cannot be
+        parsed. Truncated bodies and "PKR .00" amounts land here by design,
+        and the caller counts them as skipped.
         """
         m = SCBSmsParser.SCB_CC_TXN_PTTRN.match(sms.attrib["body"])
         if not m:
-            print(
-                "WARNING: unable to match the SCB CC txn RE against an SCB msg; "
-                "skipping it (truncated body or absent amount)"
+            SCBSmsParser._warnSkippedMsg(
+                sms,
+                "body does not match the SCB CC txn format (truncated msg, or"
+                " a foreign-currency txn carrying no PKR amount)",
             )
             return None
 
@@ -112,10 +128,16 @@ class SCBSmsParser:
             m.group("currency"), m.group("amount")
         )
         if not currencyAndAmount:
+            SCBSmsParser._warnSkippedMsg(
+                sms, "unable to parse the txn amount into a float value"
+            )
             return None
 
         datetimeObj = SCBSmsParser._convertToDateTime(m.group("txndate").strip())
         if not datetimeObj:
+            SCBSmsParser._warnSkippedMsg(
+                sms, f'unparseable txn date: {m.group("txndate").strip()}'
+            )
             return None
 
         # Known limitation: the vendor capture is kept verbatim, city included.

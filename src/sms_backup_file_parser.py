@@ -146,8 +146,9 @@ class SmsBackupFileParser:
                     # run over them. Skip + warn + count instead.
                     ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(child)
                     if ccTxn is None:
+                        # the parser already printed the one warning line
+                        # identifying this msg and why it was skipped
                         self.msgCounts["SCB_SKIPPED"] += 1
-                        print("WARNING: skipped an unparseable SCB CC txn msg")
                     else:
                         self.ccVendors.add(ccTxn.vendor)
                         self.ccTxns.append(ccTxn)
