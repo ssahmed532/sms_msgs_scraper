@@ -2,14 +2,11 @@ import hashlib
 import xml
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from parser.fbl_sms_parser import FBLSmsParser
 from parser.hbl_sms_parser import HBLSmsParser
 
 
 class SmsBackupFileParser:
-
-    # SMS messages from these short codes will be assumed to be from
-    # Faysal Bank
-    FBL_SHORT_CODES = ["8756"]
 
     # SMS messages from these short codes will be assumed to be from
     # Standard Chartered Bank
@@ -137,8 +134,20 @@ class SmsBackupFileParser:
 
                     self.ccVendors.add(ccTxn.vendor)
                     self.ccTxns.append(ccTxn)
-            elif child.attrib["address"] in self.FBL_SHORT_CODES:
-                self.msgCounts["FBL"] += 1
+            elif FBLSmsParser.isSmsFromFBL(child):
+                self.msgCounts[FBLSmsParser.ID] += 1
+
+                if FBLSmsParser.isMsgCreditCardTxn(child):
+                    # No asserts here, deliberately: FBL msgs that carry the txn
+                    # signal but cannot be parsed are known to exist, and an
+                    # assert would abort the entire run over a single bad msg.
+                    ccTxn = FBLSmsParser.extractDetailsFromTxnMsg(child)
+                    if ccTxn is None:
+                        self.msgCounts["FBL_SKIPPED"] += 1
+                        print("WARNING: skipped an unparseable FBL CC txn msg")
+                    else:
+                        self.ccVendors.add(ccTxn.vendor)
+                        self.ccTxns.append(ccTxn)
             elif child.attrib["address"] in self.SCB_SHORT_CODES:
                 self.msgCounts["SCB"] += 1
             elif child.attrib["address"] in self.MEZN_SHORT_CODES:
