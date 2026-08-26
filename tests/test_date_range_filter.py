@@ -5,6 +5,7 @@ import click
 
 from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
 from common import DEFAULT_TZ
+from debit_txn import DebitTxnDC, DebitTxnType
 from hbl_sms_query_tool import _dateRangeLabel, _filterTxnsByDateRange
 
 
@@ -117,6 +118,73 @@ class TestDateRangeFilter(unittest.TestCase):
             _dateRangeLabel(self._bound("2024-01-01"), self._bound("2024-12-31")),
             " (from 2024-01-01 to 2024-12-31)",
         )
+
+
+class TestDateRangeFilterOnDebitTxns(unittest.TestCase):
+    """The date range filter is shared by the CC and the debit commands: it
+    only ever touches .date, so it must work on DebitTxnDC as well.
+    """
+
+    def _createDebitTxn(self, isoDateTime: str) -> DebitTxnDC:
+        """Build a debit txn at the given local date *and time of day*. Unlike
+        HBL CC msgs (whose dates are midnight-stamped), FBL and Meezan msgs
+        carry a real time of day.
+        """
+        txnDate = datetime.strptime(isoDateTime, "%Y-%m-%d %H:%M").replace(
+            tzinfo=DEFAULT_TZ
+        )
+
+        return DebitTxnDC(
+            amountTuple=CurrencyAmountTuple("PKR", 5000.00),
+            date=txnDate,
+            vendor="MEEZAN ATM DHA PHASE 6",
+            txnType=DebitTxnType.ATM_WITHDRAWAL,
+            acctMask="xxxxxx5602",
+        )
+
+    def _bound(self, isoDate: str) -> datetime:
+        return datetime.strptime(isoDate, "%Y-%m-%d")
+
+    def test_debit_txns_are_filtered_by_date(self):
+        """Test method to verify that the shared filter selects debit txns by
+        calendar date just as it does CC txns.
+        """
+        txns = [
+            self._createDebitTxn("2024-05-31 18:30"),
+            self._createDebitTxn("2024-06-15 09:05"),
+            self._createDebitTxn("2024-07-01 12:00"),
+        ]
+
+        filtered = _filterTxnsByDateRange(
+            txns, self._bound("2024-06-01"), self._bound("2024-06-30")
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].date.strftime("%Y-%m-%d %H:%M"), "2024-06-15 09:05")
+
+    def test_to_date_stays_inclusive_for_a_late_evening_txn(self):
+        """Test method to verify that a txn late on the --to-date day is kept.
+        The bounds are naive midnight datetimes, so comparing datetimes
+        directly would drop any txn with a time of day past 00:00; the filter
+        compares .date() instead.
+        """
+        nearMidnight = self._createDebitTxn("2024-06-30 23:58")
+
+        filtered = _filterTxnsByDateRange(
+            [nearMidnight], self._bound("2024-06-01"), self._bound("2024-06-30")
+        )
+
+        self.assertEqual(filtered, [nearMidnight])
+
+    def test_from_date_stays_inclusive_for_a_late_evening_txn(self):
+        """Test method to verify the same inclusivity at the lower bound."""
+        nearMidnight = self._createDebitTxn("2024-06-01 23:58")
+
+        filtered = _filterTxnsByDateRange(
+            [nearMidnight], self._bound("2024-06-01"), None
+        )
+
+        self.assertEqual(filtered, [nearMidnight])
 
 
 if __name__ == "__main__":

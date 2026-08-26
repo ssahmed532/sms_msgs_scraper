@@ -8,6 +8,7 @@ import click
 
 from cc_txn import CreditCardTxnDC
 from common import Currency
+from debit_txn import DebitTxnDC, DebitTxnType
 from sms_backup_file_parser import SmsBackupFileParser
 
 # the global instance of the SMS backup msgs file parser
@@ -15,7 +16,7 @@ smsParser = None
 
 
 @click.group()
-@click.version_option("0.2.0", prog_name="hbl_sms_query_tool")
+@click.version_option("0.3.0", prog_name="hbl_sms_query_tool")
 @click.argument(
     "filepath",
     type=click.Path(
@@ -38,7 +39,7 @@ def cli(filepath):
         msgCount = smsParser.parseMessages()
         time_end = perf_counter()
         print(f"Total elapsed time: {time_end - time_start} seconds")
-        print(f"Parsed {msgCount} SMS messages from HBL")
+        print(f"Parsed {msgCount} SMS messages")
     except PermissionError as e:
         raise click.BadParameter(
             f"ERROR: cannot load SMS messages from backup file: {filepath}"
@@ -48,18 +49,23 @@ def cli(filepath):
 # The date format accepted by the --from-date / --to-date options
 DATE_RANGE_FMT = "%Y-%m-%d"
 
+# The banks whose Credit Card txns are parsed, and hence can be filtered on
+CC_BANKS = ["HBL", "FBL", "SCB"]
+
 
 def _filterTxnsByDateRange(txns: list, fromDate, toDate) -> list:
-    """Filter CC txns down to an inclusive [fromDate, toDate] range.
+    """Filter txns down to an inclusive [fromDate, toDate] range.
 
     Both bounds are optional; either may be None to leave that end open.
 
     Comparison is on the calendar date only. Txn dates are timezone-aware
     while the CLI options are not, so comparing the datetimes directly would
-    raise TypeError on the naive/aware mismatch.
+    raise TypeError on the naive/aware mismatch. Comparing dates also keeps
+    both bounds inclusive for txns that carry a real time of day (FBL and
+    Meezan msgs do; HBL msgs are midnight-stamped).
 
     Args:
-        txns (list): the CreditCardTxnDC transactions to filter
+        txns (list): the CreditCardTxnDC / DebitTxnDC transactions to filter
         fromDate (datetime | None): inclusive lower bound
         toDate (datetime | None): inclusive upper bound
 
@@ -83,6 +89,24 @@ def _filterTxnsByDateRange(txns: list, fromDate, toDate) -> list:
     return filtered
 
 
+def _filterTxnsByBank(txns: list, bank) -> list:
+    """Filter CC txns down to a single issuing bank.
+
+    Args:
+        txns (list): the CreditCardTxnDC transactions to filter
+        bank (str | None): the bank ID to keep, or None to keep every bank
+
+    Returns:
+        list: the transactions from the requested bank
+    """
+    if bank is None:
+        return txns
+
+    # click.Choice(case_sensitive=False) hands back the declared choice string
+    # (e.g. "FBL" for an input of "fbl"), so no case normalization is needed.
+    return [txn for txn in txns if txn.bank == bank]
+
+
 def _dateRangeLabel(fromDate, toDate) -> str:
     """Build a human-readable suffix describing the active date range.
 
@@ -101,6 +125,30 @@ def _dateRangeLabel(fromDate, toDate) -> str:
     return f" (from {fromDate.date()} to {toDate.date()})"
 
 
+def _bankLabel(bank) -> str:
+    """Build a human-readable suffix describing the active --bank filter.
+
+    Returns:
+        str: e.g. " (bank FBL)", or "" if unfiltered
+    """
+    if bank is None:
+        return ""
+
+    return f" (bank {bank})"
+
+
+def _txnTypeLabel(txnType) -> str:
+    """Build a human-readable suffix describing the active --txn-type filter.
+
+    Returns:
+        str: e.g. " (type atm_withdrawal)", or "" if unfiltered
+    """
+    if txnType is None:
+        return ""
+
+    return f" (type {txnType})"
+
+
 @cli.command("list_all_vendors")
 @click.option(
     "--from-date",
@@ -114,14 +162,21 @@ def _dateRangeLabel(fromDate, toDate) -> str:
     default=None,
     help="Only include transactions on or before this date (YYYY-MM-DD).",
 )
-def list_all_vendors(from_date, to_date):
-    txns = _filterTxnsByDateRange(smsParser.ccTxns, from_date, to_date)
+@click.option(
+    "--bank",
+    type=click.Choice(CC_BANKS, case_sensitive=False),
+    default=None,
+    help="Only include transactions from this bank (default: all banks).",
+)
+def list_all_vendors(from_date, to_date, bank):
+    txns = _filterTxnsByBank(smsParser.ccTxns, bank)
+    txns = _filterTxnsByDateRange(txns, from_date, to_date)
     vendors = {txn.vendor for txn in txns}
 
     click.echo("Listing all vendors from CC transactions ...")
     click.echo(
-        f"Found {len(vendors)} unique Vendors from parsed HBL SMS messages"
-        f"{_dateRangeLabel(from_date, to_date)}:"
+        f"Found {len(vendors)} unique Vendors from parsed SMS messages"
+        f"{_bankLabel(bank)}{_dateRangeLabel(from_date, to_date)}:"
     )
 
     sorted_vendors = sorted(vendors)
@@ -142,13 +197,20 @@ def list_all_vendors(from_date, to_date):
     default=None,
     help="Only include transactions on or before this date (YYYY-MM-DD).",
 )
-def list_all_cc_txns(from_date, to_date):
-    txns = _filterTxnsByDateRange(smsParser.ccTxns, from_date, to_date)
+@click.option(
+    "--bank",
+    type=click.Choice(CC_BANKS, case_sensitive=False),
+    default=None,
+    help="Only include transactions from this bank (default: all banks).",
+)
+def list_all_cc_txns(from_date, to_date, bank):
+    txns = _filterTxnsByBank(smsParser.ccTxns, bank)
+    txns = _filterTxnsByDateRange(txns, from_date, to_date)
 
     click.echo("Listing all CC transactions ...")
     click.echo(
-        f"Found {len(txns)} HBL CC transactions from parsed HBL SMS messages"
-        f"{_dateRangeLabel(from_date, to_date)}:"
+        f"Found {len(txns)} CC transactions from parsed SMS messages"
+        f"{_bankLabel(bank)}{_dateRangeLabel(from_date, to_date)}:"
     )
     print()
     for index, txn in enumerate(txns, start=1):
@@ -158,20 +220,26 @@ def list_all_cc_txns(from_date, to_date):
 #
 # monthlyTotals["2023_12"] -> {"PKR": 0.00, "CAD": 0.00, "USD": 0.00}
 #
-def _updateMonthlyTotals(txn: CreditCardTxnDC, monthlyTotals: dict) -> None:
+def _updateMonthlyTotals(
+    txn: CreditCardTxnDC | DebitTxnDC, monthlyTotals: dict
+) -> None:
     monthKey = txn.date.strftime("%Y_%m")
     currencyKey = txn.amountTuple.currency.lower()
 
-    if monthKey in monthlyTotals:
-        monthlyTotals[monthKey][currencyKey] += txn.amountTuple.amount
-    else:
+    if monthKey not in monthlyTotals:
         monthlyTotals[monthKey] = {
             Currency.CAD.value.lower(): 0.00,
             Currency.PKR.value.lower(): 0.00,
             Currency.USD.value.lower(): 0.00
         }
 
-        monthlyTotals[monthKey][currencyKey] += txn.amountTuple.amount
+    # A month is pre-seeded with pkr/cad/usd only, but the bank parsers accept
+    # any 3-letter currency code. Seeding an unseen currency here — rather than
+    # next to a += inside each branch — covers both paths at once: a first-seen
+    # currency that also opens a new month needs the seed just as much as one
+    # landing in an existing month.
+    monthlyTotals[monthKey].setdefault(currencyKey, 0.00)
+    monthlyTotals[monthKey][currencyKey] += txn.amountTuple.amount
 
 
 @cli.command("monthly_cc_spending_summary")
@@ -187,11 +255,18 @@ def _updateMonthlyTotals(txn: CreditCardTxnDC, monthlyTotals: dict) -> None:
     default=None,
     help="Only include transactions on or before this date (YYYY-MM-DD).",
 )
-def monthly_cc_spending_summary(from_date, to_date):
+@click.option(
+    "--bank",
+    type=click.Choice(CC_BANKS, case_sensitive=False),
+    default=None,
+    help="Only include transactions from this bank (default: all banks).",
+)
+def monthly_cc_spending_summary(from_date, to_date, bank):
     txnsPerMonth = defaultdict(int)
     monthlySpendingTotals = {}
 
-    for txn in _filterTxnsByDateRange(smsParser.ccTxns, from_date, to_date):
+    txns = _filterTxnsByBank(smsParser.ccTxns, bank)
+    for txn in _filterTxnsByDateRange(txns, from_date, to_date):
         # TODO: move the following line to a verbose-enabled check
         print(f"{txn} => {txn.date.strftime("%Y_%m")}")
         monthKey = txn.date.strftime("%Y_%m")
@@ -201,7 +276,79 @@ def monthly_cc_spending_summary(from_date, to_date):
         print()
 
     print()
-    print(f"Month-wise CC spending summary{_dateRangeLabel(from_date, to_date)}:")
+    print(
+        f"Month-wise CC spending summary{_bankLabel(bank)}"
+        f"{_dateRangeLabel(from_date, to_date)}:"
+    )
+    pprint.pprint(monthlySpendingTotals, indent=2, width=20, compact=True)
+
+
+@cli.command("list_all_debit_txns")
+@click.option(
+    "--from-date",
+    type=click.DateTime(formats=[DATE_RANGE_FMT]),
+    default=None,
+    help="Only include transactions on or after this date (YYYY-MM-DD).",
+)
+@click.option(
+    "--to-date",
+    type=click.DateTime(formats=[DATE_RANGE_FMT]),
+    default=None,
+    help="Only include transactions on or before this date (YYYY-MM-DD).",
+)
+@click.option(
+    "--txn-type",
+    # The Choice is built from the enum *values*: click 8.4.2's Choice does not
+    # accept the StrEnum class itself for the documented lowercase inputs
+    # (click.Choice(DebitTxnType).convert("atm_withdrawal") raises BadParameter).
+    type=click.Choice([txnType.value for txnType in DebitTxnType]),
+    default=None,
+    help="Only include debit transactions of this type (default: all types).",
+)
+def list_all_debit_txns(from_date, to_date, txn_type):
+    txns = _filterTxnsByDateRange(smsParser.debitTxns, from_date, to_date)
+    if txn_type is not None:
+        # DebitTxnType is a StrEnum, so it compares equal to the Choice string
+        txns = [txn for txn in txns if txn.txnType == txn_type]
+
+    click.echo("Listing all debit transactions ...")
+    click.echo(
+        f"Found {len(txns)} debit transactions from parsed SMS messages"
+        f"{_txnTypeLabel(txn_type)}{_dateRangeLabel(from_date, to_date)}:"
+    )
+    print()
+    for index, txn in enumerate(txns, start=1):
+        click.echo(f"{index}: {txn}")
+
+
+@cli.command("monthly_debit_spending_summary")
+@click.option(
+    "--from-date",
+    type=click.DateTime(formats=[DATE_RANGE_FMT]),
+    default=None,
+    help="Only include transactions on or after this date (YYYY-MM-DD).",
+)
+@click.option(
+    "--to-date",
+    type=click.DateTime(formats=[DATE_RANGE_FMT]),
+    default=None,
+    help="Only include transactions on or before this date (YYYY-MM-DD).",
+)
+def monthly_debit_spending_summary(from_date, to_date):
+    txnsPerMonth = defaultdict(int)
+    monthlySpendingTotals = {}
+
+    for txn in _filterTxnsByDateRange(smsParser.debitTxns, from_date, to_date):
+        # TODO: move the following line to a verbose-enabled check
+        print(f"{txn} => {txn.date.strftime("%Y_%m")}")
+        monthKey = txn.date.strftime("%Y_%m")
+        txnsPerMonth[monthKey] += 1
+
+        _updateMonthlyTotals(txn, monthlySpendingTotals)
+        print()
+
+    print()
+    print(f"Month-wise debit spending summary{_dateRangeLabel(from_date, to_date)}:")
     pprint.pprint(monthlySpendingTotals, indent=2, width=20, compact=True)
 
 

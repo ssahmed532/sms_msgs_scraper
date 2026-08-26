@@ -90,9 +90,12 @@ class TestSmsBackupFileParser(unittest.TestCase):
 
         self.assertEqual(len(parser.ccTxns), 1)
         self.assertEqual(parser.msgCounts["HBL"], 1)
-        # current routing quirk: a duplicate HBL msg fails the HBL branch
-        # condition and falls through the elif chain into OTHER
-        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        # duplicates are now detected once, up front, for every sender: a
+        # duplicate HBL msg counts as DUP instead of falling through the elif
+        # chain into OTHER (the routing quirk this pin used to record)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["OTHER"], 0)
+        # ALL counts <sms> elements, and is incremented before the dup check
         self.assertEqual(parser.msgCounts["ALL"], 2)
 
     def test_whitespace_only_variant_is_duplicate(self):
@@ -152,6 +155,66 @@ class TestSmsBackupFileParser(unittest.TestCase):
         self.assertEqual(parser.msgCounts["OTHER"], 1)
         self.assertEqual(parser.msgCounts["ALL"], 5)
         self.assertEqual(parser.ccTxns, [])
+
+    def test_msg_count_conservation(self):
+        """Test method to verify the conservation identity that must hold for
+        any backup: every counted msg lands in exactly one bucket, so
+        ALL == HBL + FBL + SCB + MEZN + OTHER + DUP. Also verifies that MMS
+        elements are excluded from every counter.
+        """
+        parser = self._parseBackup(
+            [
+                self._createHblTxnSms(),
+                self._createSms("8756", "FBL msg body"),
+                self._createSms("7220", "SCB msg body"),
+                self._createSms("8079", "Meezan msg body"),
+                self._createSms("1234", "msg from an unrecognized sender"),
+                # a duplicate of the FBL msg above
+                self._createSms("8756", "FBL msg body"),
+                ET.Element("mms"),
+            ]
+        )
+
+        perBucket = sum(
+            parser.msgCounts[bucket]
+            for bucket in ("HBL", "FBL", "SCB", "MEZN", "OTHER", "DUP")
+        )
+        self.assertEqual(parser.msgCounts["ALL"], perBucket)
+        # 6 <sms> elements; the MMS is not counted anywhere
+        self.assertEqual(parser.msgCounts["ALL"], 6)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+
+    def test_duplicate_from_unknown_sender_counted_as_dup(self):
+        """Test method to verify that dedup applies to every sender, not just
+        the recognized banks: a repeated msg from an unknown sender counts as
+        DUP rather than being counted twice as OTHER.
+        """
+        parser = self._parseBackup(
+            [
+                self._createSms("1234", "a promotional msg, retransmitted"),
+                self._createSms("1234", "a promotional msg, retransmitted"),
+            ]
+        )
+
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
+
+    def test_cross_sender_duplicate_counted_as_dup(self):
+        """Test method to verify (and pin) the cross-sender consequence of
+        body-only hashing: an identical body relayed by a second, different
+        sender counts as DUP rather than as a msg from that sender.
+        """
+        parser = self._parseBackup(
+            [
+                self._createSms("1234", "identical body from two senders"),
+                self._createSms("7220", "identical body from two senders"),
+            ]
+        )
+
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["SCB"], 0)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
 
 
 if __name__ == "__main__":

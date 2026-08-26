@@ -33,6 +33,18 @@ class SmsBackupFileParser:
         #   - the sender short code
         #   - the contents of the msg (body)
         #   - the date/timestamp it was received (or sent!)
+        #
+        # Known limitations of hashing the (stripped) body alone:
+        #   - dedup is cross-sender: two senders relaying an identical body
+        #     collapse into one msg, and the second one counts as a duplicate
+        #     rather than a msg from its own sender
+        #   - two legitimate identical purchases (same vendor, amount and date)
+        #     collapse into a single txn
+        #   - only leading/trailing whitespace is normalized here, while the
+        #     Meezan parser also collapses *internal* whitespace runs before
+        #     matching: two Meezan bodies differing only in internal spacing
+        #     hash differently and both parse. Real duplicates are byte-identical
+        #     retransmissions, so this is acceptable in practice.
         msgBody = sms.attrib["body"].strip()
         sha256Hash = hashlib.sha3_512(msgBody.encode("utf-8")).hexdigest()
         return sha256Hash
@@ -49,6 +61,8 @@ class SmsBackupFileParser:
         self.xmlRoot = None
         self.ccVendors = set()
         self.ccTxns = list()
+        self.debitVendors = set()
+        self.debitTxns = list()
         self.expectedMsgs = 0
         self.msgsParsed = 0
         self.msgCounts = defaultdict(int)
@@ -64,21 +78,22 @@ class SmsBackupFileParser:
         assert self.expectedMsgs > 0
 
     def _isSmsDuplicate(self, sms: xml.etree.ElementTree.Element) -> bool:
-        duplicate = False
+        """Report whether this msg's body has already been seen, recording it
+        if not.
+
+        Deliberately silent: with dedup applied globally (rather than per bank
+        branch) a real backup yields hundreds of duplicates — mostly
+        retransmitted promotional msgs from non-bank senders — and dumping the
+        original/duplicate body pair for each one buried the actual command
+        output under ~1,500 lines of noise. The DUP summary line carries the
+        signal instead.
+        """
         hash = SmsBackupFileParser.calcSmsMsgHash(sms)
 
         duplicate = hash in self.msgHashes
 
         if not duplicate:
             self.msgHashes[hash] = sms.attrib["body"]
-
-        if duplicate:
-            print("Original msg body:")
-            print(f"\t{self.msgHashes[hash]}")
-            print("Duplicate msg:")
-            print(f"\tsender={sms.attrib["address"]}, {sms.attrib["body"]}")
-            print()
-            print()
 
         return duplicate
 
@@ -96,17 +111,19 @@ class SmsBackupFileParser:
                 # skip over MMS messages
                 continue
 
-            # TODO:
-            #   check for duplicate messages
-            #   if an SMS msg is detected as duplicate, skip/ignore it
-            #   e.g.
-            #       2 identical SMS messages from Faysal Bank on Saturday 02/24/2024 @ 5:56pm PKT
-            #       received 1 min apart!
-            #
-
+            # Duplicates still count towards ALL: ALL is "how many <sms>
+            # elements were in the backup file", which is what the CLI reports.
             self.msgCounts["ALL"] += 1
 
-            if HBLSmsParser.isSmsFromHBL(child) and (not self._isSmsDuplicate(child)):
+            # Dedup once, up front, for every sender — the hash used to be
+            # recomputed inside each bank's branch condition, which both
+            # duplicated work and mis-routed duplicates (a duplicate HBL msg
+            # failed the HBL condition and fell through the chain into OTHER).
+            if self._isSmsDuplicate(child):
+                self.msgCounts["DUP"] += 1
+                continue
+
+            if HBLSmsParser.isSmsFromHBL(child):
                 self.msgCounts[HBLSmsParser.ID] += 1
 
                 if HBLSmsParser.isMsgCreditCardTxn(child):
@@ -120,11 +137,11 @@ class SmsBackupFileParser:
 
                     self.ccVendors.add(ccTxn.vendor)
                     self.ccTxns.append(ccTxn)
-            elif (child.attrib["address"] in self.FBL_SHORT_CODES) and (not self._isSmsDuplicate(child)):
+            elif child.attrib["address"] in self.FBL_SHORT_CODES:
                 self.msgCounts["FBL"] += 1
-            elif (child.attrib["address"] in self.SCB_SHORT_CODES) and (not self._isSmsDuplicate(child)):
+            elif child.attrib["address"] in self.SCB_SHORT_CODES:
                 self.msgCounts["SCB"] += 1
-            elif (child.attrib["address"] in self.MEZN_SHORT_CODES) and (not self._isSmsDuplicate(child)):
+            elif child.attrib["address"] in self.MEZN_SHORT_CODES:
                 self.msgCounts["MEZN"] += 1
             else:
                 self.msgCounts["OTHER"] += 1
@@ -135,7 +152,29 @@ class SmsBackupFileParser:
         print(f"\tMessages from SCB:    {self.msgCounts['SCB']}")
         print(f"\tMessages from Meezan: {self.msgCounts['MEZN']}")
         print(f"\tOther SMS Messages:   {self.msgCounts['OTHER']}")
+        print(f"\tDuplicate msgs:       {self.msgCounts['DUP']}")
         print(f"\tAll msgs count:       {self.msgCounts['ALL']}")
+        # Per-bank txn counts are derived from the txn stores rather than kept
+        # as separate counters, so they cannot drift out of sync with what the
+        # commands actually list.
+        ccTxnsPerBank = defaultdict(int)
+        for ccTxn in self.ccTxns:
+            ccTxnsPerBank[ccTxn.bank] += 1
+
+        print("Transactions summary:")
+        print(f"\tHBL CC txns:          {ccTxnsPerBank['HBL']}")
+        print(
+            f"\tFBL CC txns:          {ccTxnsPerBank['FBL']}"
+            f"  (skipped: {self.msgCounts['FBL_SKIPPED']})"
+        )
+        print(
+            f"\tSCB CC txns:          {ccTxnsPerBank['SCB']}"
+            f"  (skipped: {self.msgCounts['SCB_SKIPPED']})"
+        )
+        print(
+            f"\tMeezan debit txns:    {len(self.debitTxns)}"
+            f"  (skipped: {self.msgCounts['MEZN_SKIPPED']})"
+        )
 
         return self.msgCounts["ALL"]
 
