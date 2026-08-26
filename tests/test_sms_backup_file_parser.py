@@ -216,6 +216,157 @@ class TestSmsBackupFileParser(unittest.TestCase):
         self.assertEqual(parser.msgCounts["SCB"], 0)
         self.assertEqual(parser.msgCounts["DUP"], 1)
 
+    # ------------------------------------------------------------------
+    # Mixed-bank integration cases. These need all four parsers to exist,
+    # so they live here rather than in any single bank's test file.
+    # ------------------------------------------------------------------
+
+    def _createFblTxnSms(
+        self,
+        # padded to the real 22-char vendor column, and deliberately a
+        # different merchant from the HBL fixture's so that a vendor-set
+        # assertion can tell the two banks' contributions apart
+        vendor: str = "CHASE UP DEPT STORE   ",
+        amount: str = "8100",
+        currency: str = "PKR",
+        txnDate: str = "20-Sep-23 01:17:16 PM",
+    ) -> ET.Element:
+        body = (
+            f"Dear JOHN DOE, your FBL Card  has been charged for "
+            f"{currency} {amount} on {txnDate} at {vendor} KARACHI        PK."
+        )
+
+        return self._createSms("8756", body)
+
+    def _createScbTxnSms(
+        self,
+        vendor: str = "PSO SERVICE STATION 7Karachi PAK",
+        amount: str = "12,450.90",
+        txnDate: str = "29-09-23",
+        cardMask: str = "5452xxxxxxxx1280",
+    ) -> ET.Element:
+        body = (
+            f"Dear Client, PKR {amount} have been paid at {vendor} on "
+            f"{txnDate} using Credit Card no {cardMask}. Avail Limit "
+            f"PKR59563.45. SCBPL"
+        )
+
+        return self._createSms("7220", body)
+
+    def _createMeznAtmSms(
+        self,
+        vendor: str = "MEEZAN ATM DHA PHASE 6",
+        amount: str = "20,000.00",
+        txnDate: str = "15-Jun-24",
+        txnTime: str = "09:05",
+    ) -> ET.Element:
+        body = (
+            f"PKR {amount} cash withdrawn from {vendor} from A/C xxxxxx5602 "
+            f"KARACHI BRANCH on {txnDate} at {txnTime} Bal: PKR 1,234.00"
+        )
+
+        return self._createSms("8079", body)
+
+    def test_mixed_bank_backup(self):
+        """Test method to verify that a backup carrying one txn from each of
+        the four banks routes every msg to the right store: the three CC banks
+        share ccTxns/ccVendors, Meezan debits go to debitTxns/debitVendors, and
+        the per-bank msg counts and the conservation identity all hold at once.
+        """
+        parser = self._parseBackup(
+            [
+                self._createHblTxnSms(),
+                self._createFblTxnSms(),
+                self._createScbTxnSms(),
+                self._createMeznAtmSms(),
+                self._createSms("1234", "msg from an unrecognized sender"),
+            ]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 3)
+        self.assertEqual(
+            {txn.bank for txn in parser.ccTxns}, {"HBL", "FBL", "SCB"}
+        )
+        self.assertEqual(len(parser.debitTxns), 1)
+        self.assertEqual(parser.debitTxns[0].bank, "MEZN")
+
+        # a debit must not leak into the CC stores, nor a CC txn into the debit
+        # stores — the two are reported by different commands
+        self.assertEqual(len(parser.ccVendors), 3)
+        self.assertEqual(len(parser.debitVendors), 1)
+        self.assertTrue(parser.ccVendors.isdisjoint(parser.debitVendors))
+
+        for bank in ("HBL", "FBL", "SCB", "MEZN"):
+            with self.subTest(bank=bank):
+                self.assertEqual(parser.msgCounts[bank], 1)
+        self.assertEqual(parser.msgCounts["OTHER"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 0)
+        self.assertEqual(parser.msgCounts["ALL"], 5)
+
+        perBucket = sum(
+            parser.msgCounts[bucket]
+            for bucket in ("HBL", "FBL", "SCB", "MEZN", "OTHER", "DUP")
+        )
+        self.assertEqual(parser.msgCounts["ALL"], perBucket)
+
+    def test_no_skips_on_well_formed_mixed_backup(self):
+        """Test method to verify that a backup of well-formed msgs produces no
+        skips at all: a skipped counter climbing on good input would mean a
+        bank's txn signal and its extraction regex disagree.
+        """
+        parser = self._parseBackup(
+            [
+                self._createFblTxnSms(),
+                self._createScbTxnSms(),
+                self._createMeznAtmSms(),
+            ]
+        )
+
+        for counter in ("FBL_SKIPPED", "SCB_SKIPPED", "MEZN_SKIPPED"):
+            with self.subTest(counter=counter):
+                self.assertEqual(parser.msgCounts[counter], 0)
+
+    def test_banks_do_not_claim_each_others_msgs(self):
+        """Test method to verify that the sender short code alone decides the
+        bank: each bank's txn body, sent from *another* bank's short code, is
+        counted against the sending bank and never parsed by the bank whose
+        template it matches.
+        """
+        fblBodyOnScbCode = self._createSms(
+            "7220", self._createFblTxnSms().attrib["body"]
+        )
+        scbBodyOnMeznCode = self._createSms(
+            "8079", self._createScbTxnSms().attrib["body"]
+        )
+        meznBodyOnFblCode = self._createSms(
+            "8756", self._createMeznAtmSms().attrib["body"]
+        )
+
+        parser = self._parseBackup(
+            [fblBodyOnScbCode, scbBodyOnMeznCode, meznBodyOnFblCode]
+        )
+
+        # every msg is attributed to its sender, and none of the three parses:
+        # a bank only ever sees bodies from its own short codes
+        self.assertEqual(parser.msgCounts["SCB"], 1)
+        self.assertEqual(parser.msgCounts["MEZN"], 1)
+        self.assertEqual(parser.msgCounts["FBL"], 1)
+        self.assertEqual(parser.ccTxns, [])
+        self.assertEqual(parser.debitTxns, [])
+
+    def test_identical_bodies_across_banks_collapse_to_one_txn(self):
+        """Test method to verify (and pin) the cross-sender reach of body-only
+        hashing where it actually costs a txn: the same FBL charge body sent
+        twice yields one txn, with the second counted as DUP.
+        """
+        parser = self._parseBackup(
+            [self._createFblTxnSms(), self._createFblTxnSms()]
+        )
+
+        self.assertEqual(len(parser.ccTxns), 1)
+        self.assertEqual(parser.msgCounts["FBL"], 1)
+        self.assertEqual(parser.msgCounts["DUP"], 1)
+        self.assertEqual(parser.msgCounts["ALL"], 2)
 
 if __name__ == "__main__":
     # to run this script:
