@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from types import MappingProxyType
 
-from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-from sms_msgs_scraper.debit_txn import DebitTxnDC
+from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
+from sms_msgs_scraper.domain.debit_txn import DebitTxnDC
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic
 
 

@@ -6,11 +6,11 @@ from decimal import Decimal
 
 import click
 
-from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-from sms_msgs_scraper.common import DEFAULT_TZ
-from sms_msgs_scraper.debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
+from sms_msgs_scraper.domain.debit_txn import DebitTxnDC, DebitTxnType
 from sms_msgs_scraper.domain.money import Money
 from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.sms_txn_query_tool import _filterLabel, _filterTxnsByDateRange
 
 

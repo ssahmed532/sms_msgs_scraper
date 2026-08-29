@@ -10,15 +10,14 @@ for a fifth copy to disagree.
 
 import unittest
 
-from sms_msgs_scraper.domain.registry import (
-    BANK_SPECS,
-    REGISTRY,
+from sms_msgs_scraper.domain.bank import (
     BankRegistry,
     BankSpec,
     Capability,
     DuplicateSenderError,
     TxnKind,
 )
+from sms_msgs_scraper.parser.registry import BANK_SPECS, REGISTRY
 
 
 class TestSenderRouting(unittest.TestCase):

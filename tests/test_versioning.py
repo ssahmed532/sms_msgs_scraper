@@ -86,22 +86,27 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_minor_one_over_the_2_0_0_interface(self):
-        """2.1.0, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_patch_one_over_the_2_1_0_interface(self):
+        """2.1.1, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
         entry point instead of a script path, and Standard Chartered's recovered
         transactions changed what every SCB total returns.
 
-        2.1.0 adds `cc_spend_for_month` and takes nothing away, so every 2.0.0
-        invocation still means what it meant. That is a MINOR bump however large
-        the diff is -- and pinning the number here is what forces the judgement
-        to be made deliberately at each release rather than skipped.
+        2.1.0 was MINOR: it added `cc_spend_for_month` and took nothing away.
+
+        2.1.1 moves five modules into the subpackages they belong to and splits
+        the bank registry so the domain no longer imports the parsing layer. Not
+        one command, option, default or output stream changed, and the reference
+        corpus reproduces every count and every exact total -- so it is a PATCH
+        however many files it touched. Judging it from the outside is the whole
+        rule; pinning the number here is what forces that judgement to be made
+        deliberately at each release rather than skipped.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "1", "0"))
+        self.assertEqual((major, minor, patch), ("2", "1", "1"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

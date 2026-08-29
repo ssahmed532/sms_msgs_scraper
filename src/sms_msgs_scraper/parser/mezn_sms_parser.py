@@ -6,11 +6,11 @@ Five template families, matched in order, mapping onto four kinds of debit.
 import re
 from datetime import datetime
 
-from sms_msgs_scraper.common import DEFAULT_TZ
-from sms_msgs_scraper.debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.domain.debit_txn import DebitTxnDC, DebitTxnType
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, ParseResult, SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import AMOUNT_TOKEN_2DP_RE, Money, MoneyError
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 
 
 class MeznSmsParser:

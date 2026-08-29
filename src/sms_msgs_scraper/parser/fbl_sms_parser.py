@@ -3,11 +3,11 @@
 import re
 from datetime import datetime
 
-from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, ParseResult, SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import AMOUNT_TOKEN_PLAIN_RE, Money, MoneyError
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 
 
 class FBLSmsParser:

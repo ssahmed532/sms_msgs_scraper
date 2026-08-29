@@ -5,7 +5,17 @@ usual reader; it has no privileged access to anything the JSON and CSV
 renderers cannot reach, and all three are handed the same objects.
 """
 
-from sms_msgs_scraper.console_ui import (
+from sms_msgs_scraper.domain.aggregate import (
+    countsByAttribute,
+    grandTotals,
+    monthlyTotals,
+    totalsByGroup,
+    txnCountsByMonth,
+)
+from sms_msgs_scraper.domain.bank import TxnKind
+from sms_msgs_scraper.domain.money import MINOR_UNITS
+from sms_msgs_scraper.parser.registry import REGISTRY
+from sms_msgs_scraper.render.console_ui import (
     EMPTY_VALUE,
     acctText,
     amountText,
@@ -23,15 +33,6 @@ from sms_msgs_scraper.console_ui import (
     txnTypeText,
     vendorText,
 )
-from sms_msgs_scraper.domain.aggregate import (
-    countsByAttribute,
-    grandTotals,
-    monthlyTotals,
-    totalsByGroup,
-    txnCountsByMonth,
-)
-from sms_msgs_scraper.domain.money import MINOR_UNITS
-from sms_msgs_scraper.domain.registry import REGISTRY, TxnKind
 
 # The order currency columns appear in a monthly summary, derived from the
 # currency table rather than restated here -- there is one list of the

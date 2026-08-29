@@ -1,6 +1,6 @@
 [project]
 name = "sms-msgs-scraper"
-version = "2.1.0"
+version = "2.1.1"
 description = "Parse and analyze bank transaction SMS messages from Pakistani banks: credit card purchases, account debits, ATM withdrawals, bill payments and funds transfers"
 readme = "README.md"
 # Windows 11 and Python 3.14 are this project's *single targets*, not floors.
@@ -11,7 +11,7 @@ requires-python = ">=3.14"
 dependencies = [
     "click==8.4.2",
     # Windows ships no system IANA tz database and uv-managed interpreters
-    # bundle none, so the module-scope ZoneInfo("Asia/Karachi") in common.py
+    # bundle none, so the module-scope ZoneInfo("Asia/Karachi") in domain/tz.py
     # raises ZoneInfoNotFoundError without this.
     # Bump periodically — this is the tz rule database, not just a library.
     "tzdata==2026.3",

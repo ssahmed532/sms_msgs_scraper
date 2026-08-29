@@ -22,7 +22,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord
-from sms_msgs_scraper.domain.registry import REGISTRY
+from sms_msgs_scraper.parser.registry import REGISTRY
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "synthetic_backup.xml"

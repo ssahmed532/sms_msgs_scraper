@@ -6,9 +6,8 @@ from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
 
-from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-from sms_msgs_scraper.common import DEFAULT_TZ
-from sms_msgs_scraper.debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
+from sms_msgs_scraper.domain.debit_txn import DebitTxnDC, DebitTxnType
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, ParseResult, SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import Money
@@ -19,6 +18,7 @@ from sms_msgs_scraper.domain.report import (
     ParseReport,
 )
 from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 
 
 def aCcTxn(bank="HBL", amount="100.00", vendor="A VENDOR"):

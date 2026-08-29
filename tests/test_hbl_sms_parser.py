@@ -2,10 +2,10 @@ import unittest
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sms_msgs_scraper.common import DEFAULT_TZ
 from sms_msgs_scraper.domain.diagnostics import SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.parser.hbl_sms_parser import HBLSmsParser
 
 TXN_BODY = (

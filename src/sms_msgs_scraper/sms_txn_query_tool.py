@@ -24,7 +24,17 @@ from time import perf_counter
 import rich_click as click
 
 from sms_msgs_scraper import __version__
-from sms_msgs_scraper.console_ui import (
+from sms_msgs_scraper.domain.aggregate import (
+    MONTH_KEY_FMT,
+    monthKeyFor,
+    monthlyTotals,
+    txnCountsByMonth,
+)
+from sms_msgs_scraper.domain.debit_txn import DebitTxnType
+from sms_msgs_scraper.domain.report import DuplicatePolicy
+from sms_msgs_scraper.parser.registry import REGISTRY
+from sms_msgs_scraper.render import machine
+from sms_msgs_scraper.render.console_ui import (
     console,
     printEmptyState,
     printHeader,
@@ -34,16 +44,6 @@ from sms_msgs_scraper.console_ui import (
     setNoColor,
     statusSpinner,
 )
-from sms_msgs_scraper.debit_txn import DebitTxnType
-from sms_msgs_scraper.domain.aggregate import (
-    MONTH_KEY_FMT,
-    monthKeyFor,
-    monthlyTotals,
-    txnCountsByMonth,
-)
-from sms_msgs_scraper.domain.registry import REGISTRY
-from sms_msgs_scraper.domain.report import DuplicatePolicy
-from sms_msgs_scraper.render import machine
 from sms_msgs_scraper.render.tables import (
     bankSpendTable,
     ccTxnsTable,

@@ -19,7 +19,7 @@ are coming from 1.x — three things behave differently for an existing caller.
 | Standard Chartered | `7220`, `9220` | credit card |
 | Meezan Bank | `8079`, `9779` | account debits — card purchases, ATM withdrawals, bill payments, funds transfers |
 
-Every sender code is declared in exactly one place, `src/sms_msgs_scraper/domain/registry.py`, and
+Every sender code is declared in exactly one place, `src/sms_msgs_scraper/parser/registry.py`, and
 routing, the `--bank` choices, the parse summary and the verifier all derive from it.
 
 Credit card transactions from the three CC banks are reported together, each tagged with its issuing

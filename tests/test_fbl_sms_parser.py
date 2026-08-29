@@ -5,10 +5,10 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from sms_msgs_scraper.common import DEFAULT_TZ
 from sms_msgs_scraper.domain.diagnostics import SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.parser.fbl_sms_parser import FBLSmsParser
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
 

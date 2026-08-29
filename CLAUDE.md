@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.1.0.
+**Version:** 2.1.1.
 
 ### Semantic versioning is mandatory
 
@@ -63,7 +63,7 @@ uv run python -m unittest discover -s tests/ -v
 # a single test file
 uv run python -m unittest discover -s tests/ -p "test_hbl_sms_parser.py" -v
 
-# 3. branch coverage (threshold 90%, currently 93%)
+# 3. branch coverage (threshold 90%, currently 95%)
 uv run --with coverage coverage run -m unittest discover -s tests/
 uv run --with coverage coverage report
 ```
@@ -161,7 +161,7 @@ uv build                # build the wheel and sdist
 - `click==8.4.2` — CLI framework
 - `tzdata==2026.3` — **required on Windows.** Windows ships no system IANA tz database and
   uv-managed interpreters bundle none, so the module-scope `ZoneInfo("Asia/Karachi")` in
-  `common.py` raises `ZoneInfoNotFoundError` without it. Bump periodically — this is the tz rule
+  `domain/tz.py` raises `ZoneInfoNotFoundError` without it. Bump periodically — this is the tz rule
   database, not just a library.
 - `rich==15.0.0` — the table renderer, the parse summary and the diagnostics.
 - `rich-click==1.9.8` — Rich rendering for Click's own `--help` and usage errors. A drop-in
@@ -199,24 +199,25 @@ sms_msgs_scraper/
 │       ├── __main__.py           # python -m sms_msgs_scraper
 │       ├── sms_txn_query_tool.py # CLI entry point (rich_click)
 │       ├── sms_backup_file_parser.py  # orchestrator
-│       ├── cc_txn.py             # CreditCardTxnDC
-│       ├── debit_txn.py          # DebitTxnDC, DebitTxnType
-│       ├── common.py             # DEFAULT_TZ, and nothing else
-│       ├── console_ui.py         # the two consoles, the theme, cell helpers
-│       ├── domain/
+│       ├── domain/               # the core: stdlib only, imports nothing above it
 │       │   ├── money.py          # Money, the amount grammar, minor units
 │       │   ├── types.py          # CardReference
+│       │   ├── tz.py             # DEFAULT_TZ, and nothing else
 │       │   ├── message.py        # SmsRecord
+│       │   ├── cc_txn.py         # CreditCardTxnDC
+│       │   ├── debit_txn.py      # DebitTxnDC, DebitTxnType
 │       │   ├── diagnostics.py    # SkipReason, ParseDiagnostic, ParseResult
 │       │   ├── report.py         # ParseReport, EnvelopeCounts, DuplicatePolicy
-│       │   ├── registry.py       # BankSpec, BankRegistry — the only sender list
+│       │   ├── bank.py           # BankSpec, BankRegistry, Capability, TxnKind
 │       │   └── aggregate.py      # exact totals over Money
 │       ├── parser/
+│       │   ├── registry.py       # BANK_SPECS, REGISTRY — the only sender list
 │       │   ├── hbl_sms_parser.py
 │       │   ├── fbl_sms_parser.py
 │       │   ├── scb_sms_parser.py
 │       │   └── mezn_sms_parser.py
 │       └── render/
+│           ├── console_ui.py     # the two consoles, the theme, cell helpers
 │           ├── tables.py         # Rich tables
 │           └── machine.py        # JSON and CSV
 ├── scripts/
@@ -232,6 +233,7 @@ sms_msgs_scraper/
     ├── test_sms_backup_file_parser.py
     ├── test_cli_commands.py / test_date_range_filter.py
     ├── test_adversarial_input.py / test_adversarial_cli.py
+    ├── test_import_layering.py
     ├── test_synthetic_corpus.py
     └── test_versioning.py
 ```
@@ -242,26 +244,53 @@ own copy of a small `_parseBackup` helper.
 
 ### Module Relationships
 
+**The import graph is a strict, one-directional DAG**, and it is pinned by
+`tests/test_import_layering.py`. Four layers, each importing only from itself and the ones below:
+
+```
+app     sms_txn_query_tool.py (CLI)  ·  sms_backup_file_parser.py (orchestrator)
+  ↓
+render  console_ui.py  ·  tables.py  ·  machine.py
+  ↓
+parser  registry.py (BANK_SPECS)  ·  hbl / fbl / scb / mezn _sms_parser.py
+  ↓
+domain  money · types · tz · message · cc_txn · debit_txn · diagnostics · report
+        · bank · aggregate                        ← stdlib only, imports nothing above
+```
+
 ```
 sms_txn_query_tool.py (CLI, rich_click)
-    ├── console_ui.py        (consoles, theme, cell helpers)
+    ├── render/console_ui.py (consoles, theme, cell helpers)
     ├── render/tables.py     (Rich tables)
     ├── render/machine.py    (JSON, CSV)
     ├── domain/aggregate.py  (exact totals over Money)
-    ├── domain/registry.py   (--bank choices)
+    ├── parser/registry.py   (--bank choices)
     └── sms_backup_file_parser.py (orchestrator)
-            ├── domain/registry.py   ──→ parser/*   (signal + extract callables)
+            ├── parser/registry.py   ──→ parser/*   (signal + extract callables)
+            ├── domain/bank.py       (Capability, TxnKind)
             ├── domain/message.py    (SmsRecord)
             ├── domain/diagnostics.py
-            └── domain/report.py     ──→ cc_txn.py, debit_txn.py ──→ domain/money.py
+            └── domain/report.py     ──→ domain/cc_txn.py, domain/debit_txn.py
+                                     ──→ domain/money.py
 
 parser/*.py  ──→ domain/money.py, domain/diagnostics.py, domain/message.py,
-                 domain/types.py, cc_txn.py / debit_txn.py, common.py
+                 domain/types.py, domain/cc_txn.py / domain/debit_txn.py, domain/tz.py
 
-domain/money.py, domain/types.py, domain/message.py are leaves.
+domain/money.py, domain/types.py, domain/message.py, domain/tz.py are leaves.
 ```
 
-The parsing layer imports nothing from `render/` or `console_ui.py`, so a parser cannot print.
+The parsing layer imports nothing from `render/`, so a parser cannot print.
+
+**Only composition modules live at the package root.** Everything else that was ever put there
+turned out to belong in a subpackage: `cc_txn`, `debit_txn` and `common` were domain values that
+`domain/report.py` had to reach *up* out of its own package to import, and `console_ui` was a
+renderer that both `render/` modules reached up for. `test_import_layering.py` asserts the root's
+contents exactly, so the next module cannot land there by default.
+
+**The registry is split along that same seam.** `domain/bank.py` holds the *types* — `BankSpec`,
+`BankRegistry`, `Capability`, `TxnKind` — and `parser/registry.py` holds the *wiring*, because
+binding a bank to its extractor means importing all four parsers. Keeping them in one file under
+`domain/` made the pure core depend on the parsing layer built on top of it.
 
 ### Key Components
 
@@ -280,7 +309,7 @@ There is deliberately **no invalid `Money`**. The `-1.2345` sentinel it replaces
 invalid — it was *negative*, so a failed parse reaching a monthly total silently **reduced**
 reported spending.
 
-**`domain/registry.py`** — one `BankSpec` per bank, and the only place a sender short code appears.
+**`parser/registry.py`** — one `BankSpec` per bank, and the only place a sender short code appears.
 Routing, `--bank` choices, summary rows and the verifier all derive from it. Registration raises
 `DuplicateSenderError` if two banks claim one sender. `Capability.TXN_TIME` is what decides whether
 a suppressed duplicate is ambiguous.
@@ -330,7 +359,7 @@ share midnight on the same day.
 
 ### Bank Short Codes
 
-Declared in `domain/registry.py` and nowhere else.
+Declared in `parser/registry.py` and nowhere else.
 
 | Bank | Short Code(s) | Parser | Produces |
 |------|---------------|--------|----------|
@@ -382,7 +411,7 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
 4. Keep the txn signal **looser** than the extraction regexes. If signal and extraction are
    equivalent, a changed template is silently counted as an ordinary msg from that bank instead of
    being reported and counted in `<ID>_SKIPPED`.
-5. Add a `BankSpec` to `BANK_SPECS` in `domain/registry.py`, with its sender codes and capabilities.
+5. Add a `BankSpec` to `BANK_SPECS` in `parser/registry.py`, with its sender codes and capabilities.
    That is the only registration step — routing, `--bank`, the summary and the verifier all follow.
 6. Add `tests/test_<bank>_sms_parser.py`, and add messages to
    `tests/fixtures/build_synthetic_backup.py`.
@@ -395,7 +424,7 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
   a backup must be **stamped** with `DEFAULT_TZ` (`.replace(tzinfo=DEFAULT_TZ)`), never
   **converted** into it (`.astimezone(DEFAULT_TZ)`). `astimezone()` on a naive value reads it as the
   *host machine's* local time and shifts it, silently moving txns across day boundaries on any
-  machine not set to +05:00. `DEFAULT_TZ` is defined in `common.py` and only there.
+  machine not set to +05:00. `DEFAULT_TZ` is defined in `domain/tz.py` and only there.
 - **Naming is camelCase**, deliberately and throughout — methods, locals and instance attributes.
   This is an explicit decision, not drift: Ruff's `N802`/`N803`/`N806` are disabled in
   `pyproject.toml` with the reason written next to them. Match it.

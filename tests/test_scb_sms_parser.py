@@ -5,12 +5,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from sms_msgs_scraper.common import DEFAULT_TZ
 from sms_msgs_scraper.domain.diagnostics import SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import Money
-from sms_msgs_scraper.domain.registry import REGISTRY
 from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
+from sms_msgs_scraper.parser.registry import REGISTRY
 from sms_msgs_scraper.parser.scb_sms_parser import SCBSmsParser
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
 

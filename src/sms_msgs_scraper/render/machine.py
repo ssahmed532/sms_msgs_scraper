@@ -22,7 +22,7 @@ import csv
 import io
 import json
 
-from sms_msgs_scraper.console_ui import sanitizeField
+from sms_msgs_scraper.render.console_ui import sanitizeField
 
 # The shape of the machine-readable output. A consumer can pin this and be told
 # when it changes, rather than discovering it from a diff in their parser.

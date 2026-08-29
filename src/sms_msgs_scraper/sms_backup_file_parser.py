@@ -9,7 +9,7 @@ to be a latent defect:
     to 4,900 while the message count stayed at 4,665 -- silently breaking the
     conservation identity that is supposed to prove nothing was miscounted.
 
-  * **Registry-driven routing.** Senders are looked up in `domain/registry.py`
+  * **Registry-driven routing.** Senders are looked up in `parser/registry.py`
     rather than tested against an `elif` chain of per-parser constants. The
     chain is how Standard Chartered's second short code came to be missing: it
     had to be written down in five places, and it was written in four.
@@ -30,15 +30,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from sms_msgs_scraper.domain.bank import Capability, TxnKind
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, SkipReason
 from sms_msgs_scraper.domain.message import MMS_TAG, SMS_TAG, SmsRecord
-from sms_msgs_scraper.domain.registry import REGISTRY, Capability, TxnKind
 from sms_msgs_scraper.domain.report import (
     DuplicatePolicy,
     DuplicateRecord,
     EnvelopeCounts,
     ParseReport,
 )
+from sms_msgs_scraper.parser.registry import REGISTRY
 
 ROOT_TAG = "smses"
 

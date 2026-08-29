@@ -1,7 +1,7 @@
 """Standard Chartered (SCB) credit card transaction alerts.
 
 SCB sends from two short codes. Which two, and the fact that there are two at
-all, is now declared once in `domain/registry.py` rather than in a constant
+all, is now declared once in `parser/registry.py` rather than in a constant
 here -- this parser deliberately owns no sender list, because a sender list
 that lives next to the code that uses it is exactly what let `9220` go
 undeclared while every other part of the tool kept agreeing with itself.
@@ -10,12 +10,12 @@ undeclared while every other part of the tool kept agreeing with itself.
 import re
 from datetime import datetime
 
-from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, ParseResult, SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import AMOUNT_TOKEN_2DP_RE, Money, MoneyError
 from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 
 
 class SCBSmsParser:

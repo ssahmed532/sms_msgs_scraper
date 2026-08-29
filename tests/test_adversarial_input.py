@@ -201,7 +201,7 @@ class TestUntrustedFieldContent(AdversarialTestCase):
     """A vendor name is attacker-influenced text from an SMS."""
 
     def test_control_characters_never_reach_a_rendered_cell(self):
-        from sms_msgs_scraper.console_ui import vendorText
+        from sms_msgs_scraper.render.console_ui import vendorText
 
         hostile = "EVIL\x1b[31mSHOP\x07\x00"
 
@@ -247,9 +247,9 @@ class TestUntrustedFieldContent(AdversarialTestCase):
         from datetime import datetime
         from decimal import Decimal
 
-        from sms_msgs_scraper.cc_txn import CreditCardTxnDC
-        from sms_msgs_scraper.common import DEFAULT_TZ
+        from sms_msgs_scraper.domain.cc_txn import CreditCardTxnDC
         from sms_msgs_scraper.domain.money import Money
+        from sms_msgs_scraper.domain.tz import DEFAULT_TZ
         from sms_msgs_scraper.render.tables import ccTxnsTable
 
         txn = CreditCardTxnDC(

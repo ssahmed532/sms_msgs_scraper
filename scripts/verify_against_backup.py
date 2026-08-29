@@ -59,13 +59,13 @@ if not SRC_DIR.is_dir():
     raise SystemExit(f"FATAL: no src/ directory found at {SRC_DIR}")
 sys.path.insert(0, str(SRC_DIR))
 
-from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord  # noqa: E402
-from sms_msgs_scraper.domain.registry import (  # noqa: E402
-    REGISTRY,
+from sms_msgs_scraper.domain.bank import (  # noqa: E402
     BankRegistry,
     BankSpec,
     TxnKind,
 )
+from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord  # noqa: E402
+from sms_msgs_scraper.parser.registry import REGISTRY  # noqa: E402
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser  # noqa: E402
 
 # The backup the expected values below were derived from. Identified by content
