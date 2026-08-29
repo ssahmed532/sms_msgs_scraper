@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.0.0.
+**Version:** 2.1.0.
 
 ### Semantic versioning is mandatory
 
@@ -80,22 +80,26 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #   list_all_vendors               - Unique vendors from CC transactions
 #   list_all_cc_txns               - List all credit card transactions
 #   monthly_cc_spending_summary    - Month-wise CC spending by currency
+#   cc_spend_for_month             - One month's CC total, all banks together
 #
 # Meezan account debit commands:
 #   list_all_debit_txns            - List all account debit transactions
 #   monthly_debit_spending_summary - Month-wise debit spending by currency
 #
-# All five accept:
+# All five of those accept:
 #   --from-date YYYY-MM-DD         - only txns on or after this date (inclusive)
 #   --to-date   YYYY-MM-DD         - only txns on or before this date (inclusive)
 #
-# The three CC commands also accept:
+# cc_spend_for_month takes the month instead, and requires it:
+#   --month YYYY-MM                - the month IS the range
+#
+# The three CC commands that take a date range also accept:
 #   --bank {HBL|FBL|SCB}           - case-insensitive; default all
 #
 # list_all_debit_txns also accepts:
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
 #
-# Both monthly summary commands accept --verbose / -v.
+# Both monthly summary commands and cc_spend_for_month accept --verbose / -v.
 #
 # GLOBAL options must be written BEFORE the filepath, because a Click group
 # stops parsing its own options at the first positional argument:
@@ -109,6 +113,7 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 ```bash
 uv run sms-txn backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024-12-31
 uv run sms-txn backup.xml list_all_cc_txns --bank FBL
+uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
 uv run sms-txn --format csv backup.xml list_all_debit_txns --txn-type atm_withdrawal > atm.csv
 ```
 

@@ -24,23 +24,29 @@ def monthKeyFor(txn) -> str:
     return txn.date.strftime(MONTH_KEY_FMT)
 
 
-def monthlyTotals(txns) -> dict[str, dict[str, Money]]:
-    """Exact totals per month, per currency.
+def totalsByGroup(txns, keyFor) -> dict[str, dict[str, Money]]:
+    """Exact totals per group, per currency, grouping by whatever `keyFor`
+    returns.
 
-    Only currencies actually spent in a month appear in that month's mapping;
-    the renderer decides which columns to show and what an absent cell looks
-    like. Seeding every month with every currency here would make "nothing was
-    spent" and "zero was spent" the same value.
+    Only currencies actually spent within a group appear in that group's
+    mapping; the renderer decides which columns to show and what an absent cell
+    looks like. Seeding every group with every currency here would make
+    "nothing was spent" and "zero was spent" the same value.
     """
-    perMonth: dict[str, dict[str, Money]] = defaultdict(dict)
+    perGroup: dict[str, dict[str, Money]] = defaultdict(dict)
 
     for txn in txns:
-        monthTotals = perMonth[monthKeyFor(txn)]
+        groupTotals = perGroup[keyFor(txn)]
         currency = txn.money.currency
-        running = monthTotals.get(currency)
-        monthTotals[currency] = txn.money if running is None else running + txn.money
+        running = groupTotals.get(currency)
+        groupTotals[currency] = txn.money if running is None else running + txn.money
 
-    return dict(perMonth)
+    return dict(perGroup)
+
+
+def monthlyTotals(txns) -> dict[str, dict[str, Money]]:
+    """Exact totals per month, per currency."""
+    return totalsByGroup(txns, monthKeyFor)
 
 
 def txnCountsByMonth(txns) -> dict[str, int]:
@@ -65,12 +71,14 @@ def countsByAttribute(txns, attribute: str) -> dict[str, int]:
     return dict(counts)
 
 
-def grandTotals(perMonth: dict[str, dict[str, Money]]) -> dict[str, Money]:
-    """Fold a month-by-month breakdown back into one total per currency."""
+def grandTotals(perGroup: dict[str, dict[str, Money]]) -> dict[str, Money]:
+    """Fold a grouped breakdown -- by month, or by bank -- back into one total
+    per currency.
+    """
     totals: dict[str, Money] = {}
 
-    for monthTotals in perMonth.values():
-        for currency, money in monthTotals.items():
+    for groupTotals in perGroup.values():
+        for currency, money in groupTotals.items():
             running = totals.get(currency)
             totals[currency] = money if running is None else running + money
 

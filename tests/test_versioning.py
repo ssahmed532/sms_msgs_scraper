@@ -86,17 +86,22 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_major_one(self):
-        """2.0.0, and the reasons are interface changes rather than diff size.
+    def test_this_release_is_a_minor_one_over_the_2_0_0_interface(self):
+        """2.1.0, chosen by what the release does to an existing caller.
 
-        Three things changed meaning for an existing caller: results moved to
+        2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
         entry point instead of a script path, and Standard Chartered's recovered
         transactions changed what every SCB total returns.
+
+        2.1.0 adds `cc_spend_for_month` and takes nothing away, so every 2.0.0
+        invocation still means what it meant. That is a MINOR bump however large
+        the diff is -- and pinning the number here is what forces the judgement
+        to be made deliberately at each release rather than skipped.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "0", "0"))
+        self.assertEqual((major, minor, patch), ("2", "1", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

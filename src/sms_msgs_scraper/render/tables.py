@@ -27,6 +27,7 @@ from sms_msgs_scraper.domain.aggregate import (
     countsByAttribute,
     grandTotals,
     monthlyTotals,
+    totalsByGroup,
     txnCountsByMonth,
 )
 from sms_msgs_scraper.domain.money import MINOR_UNITS
@@ -150,21 +151,23 @@ def _currencyColumns(totals: dict) -> list:
     return columns
 
 
-def monthlySummaryTable(txns):
-    """A month-by-month spending summary: one row per month, one column per
+def _groupedTotalsTable(groupHeader, orderedKeys, perGroup, perGroupCounts, groupCell):
+    """A spending summary grouped one way: one row per group, one column per
     currency actually spent, and a footer carrying the exact grand totals.
+
+    The grouping is the only thing that varies -- by month for a summary over
+    time, by bank for a single month's spend -- so the currency columns, the
+    absent-cell rule and the totals row are decided in one place for both.
     """
-    perMonth = monthlyTotals(txns)
-    perMonthCounts = txnCountsByMonth(txns)
-    totals = grandTotals(perMonth)
+    totals = grandTotals(perGroup)
     currencies = _currencyColumns(totals)
 
     table = summaryTable(showFooter=True)
-    table.add_column("Month", footer=labelText("TOTAL", style="column.total"))
+    table.add_column(groupHeader, footer=labelText("TOTAL", style="column.total"))
     table.add_column(
         "Txns",
         justify="right",
-        footer=countText(sum(perMonthCounts.values()), style="column.total"),
+        footer=countText(sum(perGroupCounts.values()), style="column.total"),
     )
     for currency in currencies:
         table.add_column(
@@ -173,18 +176,52 @@ def monthlySummaryTable(txns):
             footer=labelText(totals[currency].formatted(), style="column.total"),
         )
 
-    for monthKey in sorted(perMonth):
-        row = [
-            labelText(monthKey, style="column.date"),
-            countText(perMonthCounts[monthKey]),
-        ]
+    for key in orderedKeys:
+        row = [groupCell(key), countText(perGroupCounts[key])]
         row.extend(
-            totalText(perMonth[monthKey].get(currency), currency)
+            totalText(perGroup[key].get(currency), currency)
             for currency in currencies
         )
         table.add_row(*row)
 
     return table
+
+
+def monthlySummaryTable(txns):
+    """A month-by-month spending summary."""
+    perMonth = monthlyTotals(txns)
+
+    return _groupedTotalsTable(
+        "Month",
+        sorted(perMonth),
+        perMonth,
+        txnCountsByMonth(txns),
+        lambda monthKey: labelText(monthKey, style="column.date"),
+    )
+
+
+def bankSpendTable(txns):
+    """The same summary grouped by issuing bank instead of by month.
+
+    The footer is the answer the caller asked for -- one exact total per
+    currency across every bank -- and the rows above it say which cards it came
+    from. Registered banks appear in registry order so the row order does not
+    depend on which bank happened to be spent on first; anything else is
+    appended, sorted, rather than dropped.
+    """
+    perBank = totalsByGroup(txns, lambda txn: txn.bank)
+    ordered = [bankId for bankId in REGISTRY.ccBankIds if bankId in perBank]
+    ordered.extend(
+        sorted(bankId for bankId in perBank if bankId not in REGISTRY.ccBankIds)
+    )
+
+    return _groupedTotalsTable(
+        "Bank",
+        ordered,
+        perBank,
+        countsByAttribute(txns, "bank"),
+        bankText,
+    )
 
 
 def parseSummaryTables(report):

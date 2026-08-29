@@ -7,8 +7,8 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.0.0.** See [what changed](#whats-new-in-200) if you are coming from 1.x — three things
-behave differently for an existing caller.
+**Version 2.1.0**, which adds `cc_spend_for_month`. See [what changed](#whats-new-in-200) if you
+are coming from 1.x — three things behave differently for an existing caller.
 
 ## Supported banks
 
@@ -51,6 +51,7 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 | `list_all_cc_txns` | every credit card transaction |
 | `list_all_vendors` | unique vendors, sorted alphabetically |
 | `monthly_cc_spending_summary` | month-by-month totals per currency |
+| `cc_spend_for_month` | one month's total across every card and all three banks |
 
 ### Meezan account debit commands
 
@@ -61,17 +62,19 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 
 ### Command options
 
-All five commands accept an inclusive date range:
+All commands except `cc_spend_for_month` accept an inclusive date range:
 
 - `--from-date YYYY-MM-DD` — only transactions on or after this date
 - `--to-date YYYY-MM-DD` — only transactions on or before this date
 
-The three credit card commands also accept `--bank {HBL|FBL|SCB}` (case-insensitive), and
-`list_all_debit_txns` accepts
+`cc_spend_for_month` takes `--month YYYY-MM` instead, and requires it: the month *is* the range.
+
+`list_all_cc_txns`, `list_all_vendors` and `monthly_cc_spending_summary` also accept
+`--bank {HBL|FBL|SCB}` (case-insensitive), and `list_all_debit_txns` accepts
 `--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}`.
 
-The two monthly summary commands accept `--verbose` / `-v`, which also lists the transactions the
-summary was built from.
+The two monthly summary commands and `cc_spend_for_month` accept `--verbose` / `-v`, which also
+lists the transactions the summary was built from.
 
 ### Global options
 
@@ -124,12 +127,24 @@ uv run sms-txn backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024
 # just Faysal Bank, month by month
 uv run sms-txn backup.xml monthly_cc_spending_summary --bank FBL
 
+# what went on the credit cards in March 2025, all banks together
+uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
+
 # every ATM withdrawal since the start of 2025
 uv run sms-txn backup.xml list_all_debit_txns --txn-type atm_withdrawal --from-date 2025-01-01
 
 # machine-readable, quiet, straight into a file
 uv run sms-txn --quiet --format csv backup.xml list_all_debit_txns > debits.csv
 ```
+
+## What's new in 2.1.0
+
+`cc_spend_for_month --month YYYY-MM` answers one question directly: what went on the credit cards
+that month, across every card and all three banks. The table's TOTAL row is the answer — one exact
+total per currency — and the rows above it say which bank each part of it came from.
+
+Nothing else changed. Every existing invocation behaves exactly as it did in 2.0.0, which is what
+makes this a MINOR release.
 
 ## What's new in 2.0.0
 

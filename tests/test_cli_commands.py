@@ -15,6 +15,7 @@ from click.testing import CliRunner
 
 from sms_msgs_scraper.sms_txn_query_tool import (
     EXIT_STRICT_FAILURE,
+    cc_spend_for_month,
     cli,
     list_all_cc_txns,
     list_all_debit_txns,
@@ -103,6 +104,7 @@ class TestCommandRegistration(CliTestCase):
             "list_all_vendors": list_all_vendors,
             "list_all_cc_txns": list_all_cc_txns,
             "monthly_cc_spending_summary": monthly_cc_spending_summary,
+            "cc_spend_for_month": cc_spend_for_month,
             "list_all_debit_txns": list_all_debit_txns,
             "monthly_debit_spending_summary": monthly_debit_spending_summary,
         }
@@ -354,6 +356,106 @@ class TestFiltersAndTotals(CliTestCase):
         vendors = [row["vendor"] for row in csv.DictReader(io.StringIO(result.stdout))]
         self.assertEqual(vendors, sorted(vendors))
         self.assertEqual(len(vendors), len(set(vendors)))
+
+
+class TestCcSpendForMonth(CliTestCase):
+    """The single-month aggregate: what was spent on credit cards in one month,
+    across every card and all three banks together.
+    """
+
+    def _sameMonthBackup(self) -> Path:
+        """Two banks spending PKR in one month, plus a third in another
+        currency -- the case the command exists for.
+        """
+        return self._backup(
+            [
+                self._sms("4250", HBL_TXN_BODY.replace("01/Oct/2023", "29/Sep/2023")),
+                self._sms("7220", SCB_TXN_BODY),
+                self._sms("8756", FBL_TXN_BODY),
+            ]
+        )
+
+    def test_spending_is_totalled_across_banks_within_the_month(self):
+        result = self.run_cli(
+            ["--format", "json", str(self._sameMonthBackup()),
+             "cc_spend_for_month", "--month", "2023-09"]
+        )
+
+        rows = {row["currency"]: row for row in json.loads(result.stdout)["rows"]}
+        # 25,170.49 on the HBL card + 12,450.90 on the SCB one
+        self.assertEqual(Decimal(rows["PKR"]["total"]), Decimal("37621.39"))
+        self.assertEqual(rows["PKR"]["txns"], 3)
+        self.assertEqual(rows["PKR"]["month"], "2023-09")
+
+    def test_currencies_are_totalled_separately_never_added(self):
+        result = self.run_cli(
+            ["--format", "json", str(self._sameMonthBackup()),
+             "cc_spend_for_month", "--month", "2023-09"]
+        )
+
+        rows = {row["currency"]: row for row in json.loads(result.stdout)["rows"]}
+        self.assertEqual(set(rows), {"PKR", "USD"})
+        self.assertEqual(Decimal(rows["USD"]["total"]), Decimal("39.99"))
+
+    def test_only_the_named_month_is_counted(self):
+        result = self.run_cli(
+            ["--format", "json", str(self._standardBackup()),
+             "cc_spend_for_month", "--month", "2023-10"]
+        )
+
+        rows = json.loads(result.stdout)["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["month"], "2023-10")
+        self.assertEqual(Decimal(rows[0]["total"]), Decimal("25170.49"))
+
+    def test_account_debits_are_not_credit_card_spend(self):
+        """The Meezan ATM withdrawal in the standard backup falls in this month
+        and must not reach a credit card total.
+        """
+        result = self.run_cli(
+            ["--format", "json", str(self._standardBackup()),
+             "cc_spend_for_month", "--month", "2024-06"]
+        )
+
+        self.assertEqual(json.loads(result.stdout)["rows"], [])
+
+    def test_the_table_breaks_the_total_down_by_bank(self):
+        result = self.run_cli(
+            [str(self._sameMonthBackup()), "cc_spend_for_month", "--month", "2023-09"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        for bank in ("HBL", "SCB", "FBL"):
+            with self.subTest(bank=bank):
+                self.assertIn(bank, result.stdout)
+        self.assertIn("TOTAL", result.stdout)
+        self.assertIn("37,621.39", result.stdout)
+
+    def test_a_month_with_no_spending_says_so_in_words(self):
+        result = self.run_cli(
+            [str(self._standardBackup()), "cc_spend_for_month", "--month", "2099-01"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("No credit card transactions in 2099-01", result.stderr)
+
+    def test_the_month_is_required(self):
+        result = self.runner.invoke(
+            cli, [str(self._standardBackup()), "cc_spend_for_month"]
+        )
+
+        self.assertEqual(result.exit_code, 2)
+
+    def test_a_month_that_is_not_yyyy_mm_is_a_usage_error(self):
+        for bad in ("2023-13", "Sep-2023", "2023-09-29"):
+            with self.subTest(month=bad):
+                result = self.runner.invoke(
+                    cli,
+                    [str(self._standardBackup()), "cc_spend_for_month",
+                     "--month", bad],
+                )
+
+                self.assertEqual(result.exit_code, 2)
 
 
 class TestTableRendering(CliTestCase):

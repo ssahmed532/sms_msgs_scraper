@@ -35,11 +35,17 @@ from sms_msgs_scraper.console_ui import (
     statusSpinner,
 )
 from sms_msgs_scraper.debit_txn import DebitTxnType
-from sms_msgs_scraper.domain.aggregate import monthlyTotals, txnCountsByMonth
+from sms_msgs_scraper.domain.aggregate import (
+    MONTH_KEY_FMT,
+    monthKeyFor,
+    monthlyTotals,
+    txnCountsByMonth,
+)
 from sms_msgs_scraper.domain.registry import REGISTRY
 from sms_msgs_scraper.domain.report import DuplicatePolicy
 from sms_msgs_scraper.render import machine
 from sms_msgs_scraper.render.tables import (
+    bankSpendTable,
     ccTxnsTable,
     debitTxnsTable,
     monthlySummaryTable,
@@ -94,6 +100,7 @@ click.rich_click.COMMAND_GROUPS = {
                 "list_all_cc_txns",
                 "list_all_vendors",
                 "monthly_cc_spending_summary",
+                "cc_spend_for_month",
             ],
         },
         {
@@ -515,6 +522,48 @@ def monthly_cc_spending_summary(ctx, from_date, to_date, bank, verbose):
         line=f"Summarizing {len(txns):,} CC transactions"
         f"{_filterLabel(from_date, to_date, bank=bank)}:",
         detailTable=lambda: ccTxnsTable(txns),
+        summaryTable=lambda: monthlySummaryTable(txns),
+    )
+
+
+@cli.command("cc_spend_for_month")
+@click.option(
+    "--month",
+    required=True,
+    type=click.DateTime(formats=[MONTH_KEY_FMT]),
+    help="The month to total, written as [bold]YYYY-MM[/].",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Also list the transactions the total was built from.",
+)
+@click.pass_context
+def cc_spend_for_month(ctx, month, verbose):
+    """Total credit card spending for one month, across every card and all
+    three banks at once.
+
+    The table's TOTAL row is the answer -- one exact total per currency -- and
+    the rows above it say which bank each part of it came from. Currencies are
+    never added together: that would need an exchange rate this tool does not
+    have.
+    """
+    monthKey = month.strftime(MONTH_KEY_FMT)
+    report = ctx.obj.report()
+    txns = [txn for txn in report.ccTxns if monthKeyFor(txn) == monthKey]
+
+    _emitMonthly(
+        ctx,
+        txns,
+        verbose,
+        title=f"CC spend for {monthKey}",
+        emptyMessage=f"No credit card transactions in {monthKey}.",
+        line=f"Totalling {len(txns):,} CC transactions in {monthKey}, "
+        f"across all banks:",
+        detailTable=lambda: ccTxnsTable(txns),
+        summaryTable=lambda: bankSpendTable(txns),
     )
 
 
@@ -578,11 +627,20 @@ def monthly_debit_spending_summary(ctx, from_date, to_date, verbose):
         line=f"Summarizing {len(txns):,} debit transactions"
         f"{_filterLabel(from_date, to_date)}:",
         detailTable=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES),
+        summaryTable=lambda: monthlySummaryTable(txns),
     )
 
 
-def _emitMonthly(ctx, txns, verbose, title, emptyMessage, line, detailTable) -> None:
-    """Render a monthly summary in whichever format was asked for."""
+def _emitMonthly(
+    ctx, txns, verbose, title, emptyMessage, line, detailTable, summaryTable
+) -> None:
+    """Render a monthly summary in whichever format was asked for.
+
+    `summaryTable` is what varies: the same totals grouped by month for a
+    summary over time, and by bank for a single month's spend. The machine
+    output does not vary with it -- JSON and CSV carry the month-and-currency
+    totals either way, so a consumer reads one shape from every command here.
+    """
     app = ctx.obj
     perMonth = monthlyTotals(txns)
     perMonthCounts = txnCountsByMonth(txns)
@@ -604,7 +662,7 @@ def _emitMonthly(ctx, txns, verbose, title, emptyMessage, line, detailTable) -> 
         console.print(detailTable())
 
     console.print()
-    console.print(monthlySummaryTable(txns))
+    console.print(summaryTable())
 
 
 def main():
