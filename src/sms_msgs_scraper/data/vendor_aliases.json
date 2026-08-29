@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "canonicalVendors": {
+    "EXAMPLE FUEL": {
+      "note": "EXAMPLE ENTRY, matching nothing real. A fuel brand is the case this feature was built for: one merchant arrives spelled several ways because a station number, a trailing city, that city's case, and whether a space precedes it all vary independently. A prefix covers every one of them, including the glued form 'EXAMPLE FUEL SERVICE STATION 7Karachi PAK'.",
+      "prefix": ["EXAMPLE FUEL SERVICE STATION"],
+      "exact": ["EXAMPLE FUEL DEPOT"]
+    },
+    "EXAMPLE UTILITY": {
+      "note": "EXAMPLE ENTRY, matching nothing real. Shows why the prefix form is not a convenience: a utility bill embeds its own consumer number and the suffix says how it was paid, so the full strings cannot be enumerated exactly. The trailing space keeps the alias on a word boundary.",
+      "prefix": ["EXAMPLE UTILITY "]
+    },
+    "EXAMPLE STORE": {
+      "note": "EXAMPLE ENTRY, matching nothing real. Shows the exact form, for a merchant whose spellings share no common opening: word order differs between the two, so no prefix could cover both.",
+      "exact": ["EXAMPLE STORE AND BAKERY", "EXAMPLE BAKERY AND STORE"]
+    }
+  }
+}

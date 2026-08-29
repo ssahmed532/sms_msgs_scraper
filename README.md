@@ -73,6 +73,15 @@ All commands except `cc_spend_for_month` accept an inclusive date range:
 `--bank {HBL|FBL|SCB}` (case-insensitive), and `list_all_debit_txns` accepts
 `--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}`.
 
+**Every** command accepts the two vendor options:
+
+- `--vendor TEXT` — only transactions whose vendor matches. Case-insensitive substring, tested
+  against the vendor as the bank sent it **and** against its canonical name, so `--vendor PSO`
+  finds every spelling the alias table groups under PSO, and `--vendor amazon` finds a transaction
+  whose vendor string is `AMZN MKTP US`.
+- `--canonical-vendors` — report each vendor under its canonical name. Off by default, so output
+  carries the strings the banks actually sent.
+
 The two monthly summary commands and `cc_spend_for_month` accept `--verbose` / `-v`, which also
 lists the transactions the summary was built from.
 
@@ -87,6 +96,7 @@ positional argument.
 | `--quiet` / `-q` | suppress the header, parse summary and diagnostics on stderr |
 | `--strict` | exit non-zero if any message could not be parsed |
 | `--duplicates {exact,none,review}` | how a repeated message is treated (default `exact`) |
+| `--vendor-map PATH` | a canonical-vendor table to use instead of the one shipped with the tool |
 | `--no-color` | render without colour |
 
 ## Output
@@ -135,7 +145,98 @@ uv run sms-txn backup.xml list_all_debit_txns --txn-type atm_withdrawal --from-d
 
 # machine-readable, quiet, straight into a file
 uv run sms-txn --quiet --format csv backup.xml list_all_debit_txns > debits.csv
+
+# every transaction at one merchant, however the banks spelled it
+uv run sms-txn backup.xml list_all_cc_txns --vendor PSO
+
+# what that merchant cost per month, under one name
+uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-vendors
 ```
+
+## Canonical vendor names
+
+A bank's alert carries whatever string the acquirer put in the transaction, and that string is not
+stable for one merchant. The reference backup holds ten spellings of what a person would call "the
+PSO station":
+
+```
+PSO SERVICE STATION 7             PSO SERVICE STATION 25
+PSO SERVICE STATION 7 A           PSO SERVICE STATION 25 KARACHI PAK
+PSO SERVICE STATION 7 Karachi PAK PSO SERVICE STATION 25 Karachi PAK
+PSO SERVICE STATION 7Karachi PAK  PSO SERVICE STATION 23 Karachi PAK
+PSO SERVICE STATION               PSO SERVICE STATION KARACHI PAK
+```
+
+Three things vary independently in there: a trailing city and country that is sometimes absent,
+that suffix's case, and whether there is a space before it at all. Other merchants add a fourth —
+the bank truncates the name mid-word, so `SHELL (CREEK SERVICE S` is all that ever arrives.
+
+**None of that is guessed at.** No suffix stripping, no fuzzy matching, no "looks like a city"
+rule: each of those silently mis-attributes spending the first time a real merchant name happens to
+end in something that looks like a city. Grouping happens only where a person wrote down that two
+names are one merchant. What is normalized is only what cannot carry meaning: case, and runs of
+internal whitespace.
+
+`src/sms_msgs_scraper/data/vendor_aliases.json` ships the **mechanism, not anyone's data** — three
+worked examples of the two alias forms, so the file documents its own schema. It claims no real
+merchant, and `tests/test_vendors.py` fails if an entry appears there that is not marked EXAMPLE.
+Your own table is a private file you pass to `--vendor-map`: the list of merchants, schools,
+hospitals and utilities someone actually pays is a map of their life, and it belongs nowhere near a
+public repository — the same reason the reference backup is never committed.
+
+```json
+{
+  "schemaVersion": 1,
+  "canonicalVendors": {
+    "EXAMPLE FUEL": {
+      "note": "One station, spelled several ways.",
+      "prefix": ["EXAMPLE FUEL SERVICE STATION"],
+      "exact": ["EXAMPLE FUEL DEPOT"]
+    },
+    "EXAMPLE UTILITY": {
+      "note": "Bills embed their own consumer number, so no exact list is possible.",
+      "prefix": ["EXAMPLE UTILITY "]
+    }
+  }
+}
+```
+
+An alias is either an `exact` full vendor string or a `prefix` of one. The prefix form is not a
+convenience: an SSGC bill embeds its own consumer number and a truncated name has no fixed ending,
+so neither can be enumerated exhaustively. A more specific alias wins over a broader one, so a map
+may claim a whole brand and then carve one station back out of it. Two canonical names claiming one
+alias is refused outright rather than resolved by ordering — that is a question the file does not
+answer, and either answer would move real money into the wrong bucket.
+
+To build your own table, start from the list of spellings the banks actually sent — that is what
+an alias has to match, and guessing at it is how a dead entry gets written:
+
+```bash
+uv run sms-txn --quiet --format csv backup.xml list_all_vendors > vendors.csv
+uv run sms-txn --vendor-map ./vendor_aliases.local.json backup.xml list_all_vendors --canonical-vendors
+```
+
+`vendor_aliases.local.json` in the repository root is gitignored and is where
+`scripts/verify_against_backup.py` looks. When it is there, the verifier checks it against the
+corpus: every alias must claim at least one real vendor, and every canonical name must collapse two
+or more spellings. An alias that matches nothing is dead config — written against a string the banks
+stopped sending, or mistyped — and it would otherwise sit there looking like it grouped something.
+With no such file, the packaged examples are reported and nothing is asserted, since they match
+nothing anywhere by design.
+
+## What's new in 2.2.0
+
+Vendor search and canonical vendor names. `--vendor TEXT` finds every transaction at one merchant
+across all four banks; `--canonical-vendors` reports the spellings under one name; `--vendor-map`
+replaces the shipped table with your own.
+
+Canonicalization is **opt-in**, which is what makes this a minor release: a run that does not ask
+for it sees the same vendor strings, the same row counts and the same totals as 2.1.1, and every
+existing figure in the reference table is unchanged.
+
+The packaged table ships worked examples only. A real one is a private file passed to
+`--vendor-map`, because a list of the merchants, schools, hospitals and utilities someone pays is a
+map of their life and this repository is public.
 
 ## What's new in 2.1.0
 

@@ -16,6 +16,7 @@ running it still sees what happened.
 """
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
@@ -29,9 +30,15 @@ from sms_msgs_scraper.domain.aggregate import (
     monthKeyFor,
     monthlyTotals,
     txnCountsByMonth,
+    txnSortKey,
 )
 from sms_msgs_scraper.domain.debit_txn import DebitTxnType
 from sms_msgs_scraper.domain.report import DuplicatePolicy
+from sms_msgs_scraper.domain.vendors import (
+    VendorAliasMap,
+    VendorMapError,
+    normalizeVendor,
+)
 from sms_msgs_scraper.parser.registry import REGISTRY
 from sms_msgs_scraper.render import machine
 from sms_msgs_scraper.render.console_ui import (
@@ -41,6 +48,7 @@ from sms_msgs_scraper.render.console_ui import (
     printNotice,
     printRule,
     printWarning,
+    sanitizeField,
     setNoColor,
     statusSpinner,
 )
@@ -123,17 +131,49 @@ class AppContext:
     anyway, being one-shot.
     """
 
-    def __init__(self, filepath, quiet, strict, duplicatePolicy, outputFormat):
+    def __init__(
+        self,
+        filepath,
+        quiet,
+        strict,
+        duplicatePolicy,
+        outputFormat,
+        vendorMapPath=None,
+    ):
         self.filepath = filepath
         self.quiet = quiet
         self.strict = strict
         self.duplicatePolicy = duplicatePolicy
         self.outputFormat = outputFormat
+        self.vendorMapPath = vendorMapPath
         self._report = None
+        self._vendorMap = None
 
     @property
     def machineReadable(self) -> bool:
         return self.outputFormat != "table"
+
+    def vendorMap(self):
+        """The canonical-vendor table, loaded the first time one is wanted.
+
+        Deferred for the same reason the backup is: a run that never
+        mentions vendors should not read a file to answer. Memoised, so
+        two accesses in one command do not parse the table twice.
+        """
+        if self._vendorMap is not None:
+            return self._vendorMap
+
+        try:
+            if self.vendorMapPath is None:
+                vendorMap = VendorAliasMap.loadDefault()
+            else:
+                vendorMap = VendorAliasMap.loadFromPath(self.vendorMapPath)
+        except VendorMapError as error:
+            raise click.ClickException(str(error)) from error
+
+        self._vendorMap = vendorMap
+
+        return vendorMap
 
     def report(self):
         if self._report is not None:
@@ -293,8 +333,24 @@ class StrictFailure(click.ClickException):
     show_default=True,
     help="How results are written to stdout.",
 )
+@click.option(
+    "--vendor-map",
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        path_type=Path,
+    ),
+    default=None,
+    help="A JSON canonical-vendor table to use instead of the one shipped "
+    "with the tool. Must be written [bold]before[/] FILEPATH. Read only when "
+    "a command actually asks about vendors.",
+)
 @click.pass_context
-def cli(ctx, filepath, no_color, quiet, strict, duplicates, output_format):
+def cli(
+    ctx, filepath, no_color, quiet, strict, duplicates, output_format, vendor_map
+):
     """Parse and analyze bank transaction SMS messages from an Android SMS
     backup file.
 
@@ -314,6 +370,7 @@ def cli(ctx, filepath, no_color, quiet, strict, duplicates, output_format):
         strict=strict,
         duplicatePolicy=DuplicatePolicy(duplicates),
         outputFormat=output_format,
+        vendorMapPath=vendor_map,
     )
 
 
@@ -331,6 +388,33 @@ def dateRangeOptions(command):
         type=click.DateTime(formats=[DATE_RANGE_FMT]),
         default=None,
         help="Only include transactions on or after this date (YYYY-MM-DD).",
+    )(command)
+
+
+def vendorOptions(command):
+    """The --vendor / --canonical-vendors pair every command accepts.
+
+    Both are subcommand options rather than group options, so they can be
+    written after the filepath where they read naturally. `--vendor-map` is the
+    exception and stays on the group, because it names a data source the way
+    the backup file itself does.
+    """
+    command = click.option(
+        "--canonical-vendors",
+        is_flag=True,
+        default=False,
+        help="Report each vendor under its canonical name, collapsing the "
+        "spellings the alias table groups together. Off by default, so output "
+        "carries the strings the banks actually sent.",
+    )(command)
+
+    return click.option(
+        "--vendor",
+        default=None,
+        help="Only include transactions whose vendor matches this text. "
+        "Case-insensitive substring, tested against the vendor as sent "
+        "[bold]and[/] against its canonical name -- so [bold]--vendor PSO[/] "
+        "finds every spelling the table groups under PSO.",
     )(command)
 
 
@@ -377,14 +461,99 @@ def _filterTxnsByBank(txns, bank):
     return [txn for txn in txns if txn.bank == bank]
 
 
-def _filterLabel(fromDate, toDate, bank=None, txnType=None) -> str:
-    """A human-readable suffix describing the active filters."""
+def _applyVendorOptions(ctx, txns, vendor, canonicalVendors):
+    """Filter by vendor, then optionally rewrite vendors to canonical names.
+
+    In that order, and the order is the point. Matching happens against the
+    strings the banks sent as well as against canonical names, so a search
+    works whether or not the alias table has heard of the merchant; rewriting
+    afterwards is presentation, and would have thrown away half of what the
+    search needed to see.
+
+    Nothing here loads the alias table unless one of the two options was
+    given -- an ordinary listing never touches it.
+    """
+    if vendor is None and not canonicalVendors:
+        return list(txns)
+
+    aliases = ctx.obj.vendorMap()
+
+    if vendor is not None:
+        txns = _filterTxnsByVendor(txns, vendor, aliases)
+
+    if canonicalVendors:
+        txns = _canonicalizeVendors(txns, aliases)
+
+    return list(txns)
+
+
+def _filterTxnsByVendor(txns, vendor, aliases):
+    """Transactions whose vendor, or whose canonical vendor, contains `vendor`.
+
+    Substring rather than equality because the strings are what they are: the
+    merchant a person means by "PSO" is spelled ten ways in the reference
+    corpus, half of them with a city glued to the end. Case and internal
+    spacing are folded by the same rule the alias table is matched with, so a
+    search behaves the same way the grouping does.
+    """
+    needle = normalizeVendor(vendor)
+
+    if not needle:
+        raise click.BadParameter("--vendor needs some text to match on")
+
+    return [
+        txn
+        for txn in txns
+        if needle in normalizeVendor(txn.vendor)
+        or needle in normalizeVendor(aliases.canonicalFor(txn.vendor))
+    ]
+
+
+def _canonicalizeVendors(txns, aliases):
+    """Rewrite each transaction's vendor to its canonical name.
+
+    Transactions are frozen, so this builds new ones, which re-runs their
+    validation -- a canonical name was already checked to be non-empty when the
+    table was loaded, so that check can only pass here.
+
+    The re-sort is not cosmetic. Vendor is one of the tie-breakers in the
+    documented output order, and a great many transactions share a date and a
+    bank because HBL and SCB alerts carry no time of day. Rewriting vendors
+    without re-sorting would leave a listing out of the order the tool promises.
+    """
+    rewritten = []
+
+    for txn in txns:
+        canonical = aliases.canonicalFor(txn.vendor)
+        rewritten.append(
+            txn if canonical == txn.vendor else replace(txn, vendor=canonical)
+        )
+
+    return sorted(rewritten, key=txnSortKey)
+
+
+def _filterLabel(
+    fromDate,
+    toDate,
+    bank=None,
+    txnType=None,
+    vendor=None,
+    canonicalVendors=False,
+) -> str:
+    """A human-readable suffix describing the active filters.
+
+    The vendor is sanitized because it is the one part of this line that came
+    from outside: it is typed on the command line rather than chosen from a
+    Choice, and a control character in it would otherwise reach the terminal.
+    """
     parts = []
 
     if bank is not None:
         parts.append(f"bank {bank}")
     if txnType is not None:
         parts.append(f"type {txnType}")
+    if vendor is not None:
+        parts.append(f'vendor matching "{sanitizeField(vendor)}"')
     # A two-sided range reads as one phrase rather than two clauses.
     if fromDate is not None and toDate is not None:
         parts.append(f"from {fromDate.date()} to {toDate.date()}")
@@ -392,6 +561,9 @@ def _filterLabel(fromDate, toDate, bank=None, txnType=None) -> str:
         parts.append(f"from {fromDate.date()}")
     elif toDate is not None:
         parts.append(f"up to {toDate.date()}")
+
+    if canonicalVendors:
+        parts.append("canonical vendors")
 
     return f" ({', '.join(parts)})" if parts else ""
 
@@ -444,14 +616,20 @@ class _Notice:
 @cli.command("list_all_vendors")
 @dateRangeOptions
 @bankOption
+@vendorOptions
 @click.pass_context
-def list_all_vendors(ctx, from_date, to_date, bank):
+def list_all_vendors(ctx, from_date, to_date, bank, vendor, canonical_vendors):
     """List the unique vendors seen in credit card transactions, sorted
     alphabetically.
+
+    With [bold]--canonical-vendors[/] this is the list to read before writing
+    an alias entry: it is the set of distinct spellings the banks actually
+    sent, which is what an alias has to match.
     """
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
     vendors = sorted({txn.vendor for txn in txns})
 
     _emit(
@@ -464,7 +642,13 @@ def list_all_vendors(ctx, from_date, to_date, bank):
         notice=_Notice(
             "Credit card vendors",
             f"Found {len(vendors):,} unique vendors"
-            f"{_filterLabel(from_date, to_date, bank=bank)}:",
+            f"{_filterLabel(
+                from_date,
+                to_date,
+                bank=bank,
+                vendor=vendor,
+                canonicalVendors=canonical_vendors,
+            )}:",
         ),
     )
 
@@ -472,14 +656,16 @@ def list_all_vendors(ctx, from_date, to_date, bank):
 @cli.command("list_all_cc_txns")
 @dateRangeOptions
 @bankOption
+@vendorOptions
 @click.pass_context
-def list_all_cc_txns(ctx, from_date, to_date, bank):
+def list_all_cc_txns(ctx, from_date, to_date, bank, vendor, canonical_vendors):
     """List every credit card transaction, from HBL, Faysal Bank and Standard
     Chartered together.
     """
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
 
     _emit(
         ctx,
@@ -491,7 +677,13 @@ def list_all_cc_txns(ctx, from_date, to_date, bank):
         notice=_Notice(
             "Credit card transactions",
             f"Found {len(txns):,} CC transactions"
-            f"{_filterLabel(from_date, to_date, bank=bank)}:",
+            f"{_filterLabel(
+                from_date,
+                to_date,
+                bank=bank,
+                vendor=vendor,
+                canonicalVendors=canonical_vendors,
+            )}:",
         ),
     )
 
@@ -499,6 +691,7 @@ def list_all_cc_txns(ctx, from_date, to_date, bank):
 @cli.command("monthly_cc_spending_summary")
 @dateRangeOptions
 @bankOption
+@vendorOptions
 @click.option(
     "--verbose",
     "-v",
@@ -507,11 +700,14 @@ def list_all_cc_txns(ctx, from_date, to_date, bank):
     help="Also list the transactions the summary was built from.",
 )
 @click.pass_context
-def monthly_cc_spending_summary(ctx, from_date, to_date, bank, verbose):
+def monthly_cc_spending_summary(
+    ctx, from_date, to_date, bank, vendor, canonical_vendors, verbose
+):
     """Summarize credit card spending month by month, one column per currency."""
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
 
     _emitMonthly(
         ctx,
@@ -520,7 +716,13 @@ def monthly_cc_spending_summary(ctx, from_date, to_date, bank, verbose):
         title="Month-wise CC spending",
         emptyMessage="No credit card transactions match this filter.",
         line=f"Summarizing {len(txns):,} CC transactions"
-        f"{_filterLabel(from_date, to_date, bank=bank)}:",
+        f"{_filterLabel(
+            from_date,
+            to_date,
+            bank=bank,
+            vendor=vendor,
+            canonicalVendors=canonical_vendors,
+        )}:",
         detailTable=lambda: ccTxnsTable(txns),
         summaryTable=lambda: monthlySummaryTable(txns),
     )
@@ -533,6 +735,7 @@ def monthly_cc_spending_summary(ctx, from_date, to_date, bank, verbose):
     type=click.DateTime(formats=[MONTH_KEY_FMT]),
     help="The month to total, written as [bold]YYYY-MM[/].",
 )
+@vendorOptions
 @click.option(
     "--verbose",
     "-v",
@@ -541,7 +744,7 @@ def monthly_cc_spending_summary(ctx, from_date, to_date, bank, verbose):
     help="Also list the transactions the total was built from.",
 )
 @click.pass_context
-def cc_spend_for_month(ctx, month, verbose):
+def cc_spend_for_month(ctx, month, vendor, canonical_vendors, verbose):
     """Total credit card spending for one month, across every card and all
     three banks at once.
 
@@ -553,6 +756,7 @@ def cc_spend_for_month(ctx, month, verbose):
     monthKey = month.strftime(MONTH_KEY_FMT)
     report = ctx.obj.report()
     txns = [txn for txn in report.ccTxns if monthKeyFor(txn) == monthKey]
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
 
     _emitMonthly(
         ctx,
@@ -561,7 +765,13 @@ def cc_spend_for_month(ctx, month, verbose):
         title=f"CC spend for {monthKey}",
         emptyMessage=f"No credit card transactions in {monthKey}.",
         line=f"Totalling {len(txns):,} CC transactions in {monthKey}, "
-        f"across all banks:",
+        f"across all banks"
+        f"{_filterLabel(
+            None,
+            None,
+            vendor=vendor,
+            canonicalVendors=canonical_vendors,
+        )}:",
         detailTable=lambda: ccTxnsTable(txns),
         summaryTable=lambda: bankSpendTable(txns),
     )
@@ -569,6 +779,7 @@ def cc_spend_for_month(ctx, month, verbose):
 
 @cli.command("list_all_debit_txns")
 @dateRangeOptions
+@vendorOptions
 @click.option(
     "--txn-type",
     type=click.Choice(DEBIT_TXN_TYPES),
@@ -576,7 +787,7 @@ def cc_spend_for_month(ctx, month, verbose):
     help="Only include debit transactions of this type (default: all types).",
 )
 @click.pass_context
-def list_all_debit_txns(ctx, from_date, to_date, txn_type):
+def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_type):
     """List every Meezan account debit -- card purchases, ATM withdrawals, bill
     payments and funds transfers.
     """
@@ -585,6 +796,7 @@ def list_all_debit_txns(ctx, from_date, to_date, txn_type):
     if txn_type is not None:
         # DebitTxnType is a StrEnum, so it compares equal to the Choice string
         txns = [txn for txn in txns if txn.txnType == txn_type]
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
 
     _emit(
         ctx,
@@ -596,13 +808,20 @@ def list_all_debit_txns(ctx, from_date, to_date, txn_type):
         notice=_Notice(
             "Account debit transactions",
             f"Found {len(txns):,} debit transactions"
-            f"{_filterLabel(from_date, to_date, txnType=txn_type)}:",
+            f"{_filterLabel(
+                from_date,
+                to_date,
+                txnType=txn_type,
+                vendor=vendor,
+                canonicalVendors=canonical_vendors,
+            )}:",
         ),
     )
 
 
 @cli.command("monthly_debit_spending_summary")
 @dateRangeOptions
+@vendorOptions
 @click.option(
     "--verbose",
     "-v",
@@ -611,12 +830,15 @@ def list_all_debit_txns(ctx, from_date, to_date, txn_type):
     help="Also list the transactions the summary was built from.",
 )
 @click.pass_context
-def monthly_debit_spending_summary(ctx, from_date, to_date, verbose):
+def monthly_debit_spending_summary(
+    ctx, from_date, to_date, vendor, canonical_vendors, verbose
+):
     """Summarize Meezan account debit spending month by month, one column per
     currency.
     """
     report = ctx.obj.report()
     txns = _filterTxnsByDateRange(report.debitTxns, from_date, to_date)
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
 
     _emitMonthly(
         ctx,
@@ -625,7 +847,12 @@ def monthly_debit_spending_summary(ctx, from_date, to_date, verbose):
         title="Month-wise debit spending",
         emptyMessage="No account debit transactions match this filter.",
         line=f"Summarizing {len(txns):,} debit transactions"
-        f"{_filterLabel(from_date, to_date)}:",
+        f"{_filterLabel(
+            from_date,
+            to_date,
+            vendor=vendor,
+            canonicalVendors=canonical_vendors,
+        )}:",
         detailTable=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES),
         summaryTable=lambda: monthlySummaryTable(txns),
     )

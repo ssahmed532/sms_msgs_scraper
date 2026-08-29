@@ -20,7 +20,7 @@ sender list*, and fails when a signature turns up on a sender no bank claims.
 That check does not depend on anyone having thought to write an expectation for
 it, which is the only kind of check that could have caught the original bug.
 
-Three kinds of check, and the difference matters:
+Four kinds of check, and the difference matters:
 
   * **Discovery** finds what routing missed. Always run, never expectation-based.
   * **Invariants** hold for any backup and are always asserted -- the
@@ -29,6 +29,11 @@ Three kinds of check, and the difference matters:
   * **Expected values** are tied to one backup file, identified by its SHA-256.
     Asserted exactly against that file; merely reported against any other, since
     they cannot mean anything there.
+  * **Vendor map liveness** is the same anti-drift rule applied to the shipped
+    alias table: every alias must claim a real vendor and every canonical name
+    must collapse two or more spellings. Asserted against the reference backup
+    only -- a different backup may legitimately lack a merchant the table knows
+    about, so an idle entry there says nothing.
 
 It prints counts and totals only, never message bodies, vendors or card digits.
 Parse diagnostics are summarised by reason code rather than printed: an SMS
@@ -65,6 +70,10 @@ from sms_msgs_scraper.domain.bank import (  # noqa: E402
     TxnKind,
 )
 from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord  # noqa: E402
+from sms_msgs_scraper.domain.vendors import (  # noqa: E402
+    VendorAliasMap,
+    normalizeVendor,
+)
 from sms_msgs_scraper.parser.registry import REGISTRY  # noqa: E402
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser  # noqa: E402
 
@@ -75,6 +84,16 @@ REFERENCE_BACKUP_NAME = "sms-20251011130814.xml"
 REFERENCE_BACKUP_SHA256 = (
     "c0792da646c9f06b1d83bf02f80930ac8e6e27b16d616e84a762537eb30668f3"
 )
+
+# The real canonical-vendor table. It names the actual merchants, schools,
+# hospitals and utilities in one person's spending, so it is kept out of the
+# repository exactly as the backup is, and lives here by convention.
+#
+# When it is present, the liveness rule below is *asserted* against it. When it
+# is not, the packaged table is reported instead and nothing is asserted: that
+# one ships as worked examples matching nothing real, so a liveness check on it
+# would fail by design rather than by drift.
+LOCAL_VENDOR_MAP_PATH = REPO_ROOT / "vendor_aliases.local.json"
 
 # Senders that carry a transaction signature but are deliberately not parsed.
 # Empty, and it should stay that way: an entry here is a documented decision to
@@ -422,6 +441,82 @@ def checkRecoveredSender(backupPath: Path, report) -> list:
     return failures, recoveredTxns, recoveredTotal
 
 
+def checkVendorAliases(report) -> tuple[list, dict, bool]:
+    """Every shipped alias must claim a real vendor, and every canonical name
+    must collapse two or more spellings.
+
+    This is the anti-drift rule applied to the alias table. An alias that
+    matches nothing is dead config: it was written against a vendor string the
+    banks have stopped sending, or it was mistyped, and either way it is
+    silently grouping nothing while looking like it groups something. A
+    canonical name that claims only one spelling is not canonicalization at
+    all -- it renames one vendor, which is a different thing and worth being
+    told about.
+
+    Only alias and canonical *names* are reported when this fails. Those are
+    values from the map file, which is config a person wrote; no vendor string
+    out of the corpus is printed, so this check keeps the script's rule that
+    its output carries no message content.
+    """
+    isLocal = LOCAL_VENDOR_MAP_PATH.is_file()
+    aliases = (
+        VendorAliasMap.loadFromPath(LOCAL_VENDOR_MAP_PATH)
+        if isLocal
+        else VendorAliasMap.loadDefault()
+    )
+
+    vendors = {txn.vendor for txn in report.ccTxns}
+    vendors.update(txn.vendor for txn in report.debitTxns)
+    keys = sorted(normalizeVendor(vendor) for vendor in vendors)
+
+    failures = []
+
+    for alias, canonical in aliases.exactAliases.items():
+        if alias not in keys:
+            failures.append(
+                f"vendor map: exact alias {alias!r} (for {canonical!r}) matches "
+                f"no vendor in this backup"
+            )
+
+    for alias, canonical in aliases.prefixAliases:
+        if not any(key.startswith(alias) for key in keys):
+            failures.append(
+                f"vendor map: prefix alias {alias!r} (for {canonical!r}) matches "
+                f"no vendor in this backup"
+            )
+
+    # A vendor is *claimed* when an alias matches it -- which is not the same
+    # as its canonical name differing from it. A merchant whose raw string is
+    # already exactly its canonical name is claimed and must be counted, or a
+    # perfectly good two-spelling group looks like a one-spelling one.
+    claimed: dict[str, set] = defaultdict(set)
+    for vendor in vendors:
+        key = normalizeVendor(vendor)
+        isClaimed = key in aliases.exactAliases or any(
+            key.startswith(prefix) for prefix, _ in aliases.prefixAliases
+        )
+        if isClaimed:
+            claimed[aliases.canonicalFor(vendor)].add(vendor)
+
+    for canonical in aliases.canonicalNames:
+        spellings = len(claimed.get(canonical, ()))
+        if spellings < 2:
+            failures.append(
+                f"vendor map: {canonical!r} groups {spellings} spelling(s) in "
+                f"this backup, so it collapses nothing"
+            )
+
+    stats = {
+        "source": LOCAL_VENDOR_MAP_PATH.name if isLocal else "packaged examples",
+        "aliases": aliases.aliasCount,
+        "canonical_names": len(aliases.canonicalNames),
+        "raw_vendors": len(vendors),
+        "after_canonicalization": len({aliases.canonicalFor(v) for v in vendors}),
+    }
+
+    return failures, stats, isLocal
+
+
 def main(argv: list) -> int:
     backupPath = (
         Path(argv[1]).resolve() if len(argv) > 1 else REPO_ROOT / REFERENCE_BACKUP_NAME
@@ -530,6 +625,35 @@ def main(argv: list) -> int:
         print("These are this backup's numbers, not a pass/fail. To gate on them,")
         print("record the derivation in CLAUDE.md's Reference numbers table, then")
         print("update EXPECTED, EXPECTED_TOTALS and REFERENCE_BACKUP_SHA256 here.")
+
+    # ---------------------------------------------------------------- vendor map
+    aliasFailures, aliasStats, usingLocalMap = checkVendorAliases(report)
+    print()
+    print("-- vendor map: every alias live, every canonical name collapsing --")
+    print(f"  source: {aliasStats['source']}")
+    print(
+        f"  {aliasStats['aliases']} aliases under "
+        f"{aliasStats['canonical_names']} canonical names"
+    )
+    print(
+        f"  {aliasStats['raw_vendors']} raw vendor strings -> "
+        f"{aliasStats['after_canonicalization']} canonical"
+    )
+    if isReference and usingLocalMap:
+        # Asserted only where both halves line up: the table derived from this
+        # corpus, checked against this corpus. Another backup may legitimately
+        # lack a merchant the table knows about, and the packaged examples
+        # match nothing anywhere by design -- in neither case does an idle
+        # entry mean anything.
+        failures.extend(aliasFailures)
+        print(f"  result: {'ok' if not aliasFailures else 'MISS'}")
+    elif not usingLocalMap:
+        print(
+            f"  result: not asserted -- no {LOCAL_VENDOR_MAP_PATH.name} here, so "
+            f"the packaged example table was read instead"
+        )
+    else:
+        print(f"  result: {len(aliasFailures)} entry/entries idle here (not asserted)")
 
     # ---------------------------------------------------------------- invariants
     invariantFailures = checkInvariants(report, metrics)

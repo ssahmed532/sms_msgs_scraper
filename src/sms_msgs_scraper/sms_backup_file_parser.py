@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from sms_msgs_scraper.domain.aggregate import txnSortKey
 from sms_msgs_scraper.domain.bank import Capability, TxnKind
 from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, SkipReason
 from sms_msgs_scraper.domain.message import MMS_TAG, SMS_TAG, SmsRecord
@@ -304,8 +305,8 @@ class SmsBackupFileParser:
         return ParseReport(
             envelope=envelope,
             counts=MappingProxyType(dict(counts)),
-            ccTxns=tuple(sorted(ccTxns, key=_txnSortKey)),
-            debitTxns=tuple(sorted(debitTxns, key=_txnSortKey)),
+            ccTxns=tuple(sorted(ccTxns, key=txnSortKey)),
+            debitTxns=tuple(sorted(debitTxns, key=txnSortKey)),
             diagnostics=tuple(diagnostics),
             duplicates=tuple(duplicates),
             duplicatePolicy=self.duplicatePolicy,
@@ -412,25 +413,3 @@ class SmsBackupFileParser:
             ccTxns.append(result.txn)
         else:
             debitTxns.append(result.txn)
-
-
-def _txnSortKey(txn):
-    """The documented total order for a transaction listing.
-
-    Output order used to be whatever order the messages happened to sit in the
-    XML file, which is stable for one file and meaningless across two. Sorting
-    on the transaction's own timestamp makes a listing comparable between runs,
-    between merged backups and between exports.
-
-    The tie-breakers exist to make the order *total*: many transactions share a
-    timestamp, and HBL and SCB alerts carry a date only, so a great many share
-    midnight on the same day. Bank, vendor, currency and amount resolve those
-    deterministically.
-    """
-    return (
-        txn.date,
-        txn.bank,
-        txn.vendor,
-        txn.money.currency,
-        txn.money.amount,
-    )

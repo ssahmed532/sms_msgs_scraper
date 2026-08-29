@@ -1,4 +1,15 @@
-"""Behaviour a script depends on, and the `python -O` release gate."""
+"""Behaviour a script depends on, and the `python -O` release gate.
+
+These read the shared synthetic fixture, and deliberately assert **no count
+taken from it**. Exact fixture numbers belong in exactly one place,
+`test_synthetic_corpus.py`. A second copy here bought no coverage and made
+every fixture edit fail in a file about parity and stream contracts instead:
+adding one merchant to the fixture turned into two red tests whose subject
+was neither merchants nor vendors.
+
+If a fixture change makes something here fail, the fix is to stop asserting
+the number, not to update it.
+"""
 
 import json
 import subprocess
@@ -76,11 +87,16 @@ class TestOptimizedParity(unittest.TestCase):
         self.assertEqual(normal.stdout, optimized.stdout)
 
     def test_the_parity_program_actually_produced_transactions(self):
-        """Guards the test above from passing on two empty results."""
+        """Guards the test above from passing on two empty results.
+
+        A lower bound and not an exact count, on purpose: "there was something
+        to compare" is the whole job here, and how much of it there was is
+        pinned in `test_synthetic_corpus.py`.
+        """
         payload = json.loads(runProgram(PARITY_PROGRAM % str(FIXTURE), False).stdout)
 
-        self.assertEqual(len(payload["ccTxns"]), 11)
-        self.assertEqual(len(payload["debitTxns"]), 6)
+        self.assertGreater(len(payload["ccTxns"]), 0)
+        self.assertGreater(len(payload["debitTxns"]), 0)
 
     def test_no_amount_is_ever_negative_under_either_mode(self):
         for optimized in (False, True):
@@ -161,7 +177,12 @@ class TestStdoutIsAContract(unittest.TestCase):
         # stderr carries the skipped-message warnings for this fixture
         self.assertIn("WARNING", result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["count"], 11)
+        # The envelope's own invariant, rather than a second copy of the
+        # fixture's transaction count: `count` has to describe the rows it was
+        # shipped with. That is the thing a consumer actually relies on, and
+        # nothing checked it before.
+        self.assertEqual(payload["count"], len(payload["rows"]))
+        self.assertGreater(payload["count"], 0)
 
     def test_quiet_leaves_stderr_empty_on_a_clean_command(self):
         result = self._run(

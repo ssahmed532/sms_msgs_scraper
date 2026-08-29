@@ -1,6 +1,6 @@
 [project]
 name = "sms-msgs-scraper"
-version = "2.1.1"
+version = "2.2.0"
 description = "Parse and analyze bank transaction SMS messages from Pakistani banks: credit card purchases, account debits, ATM withdrawals, bill payments and funds transfers"
 readme = "README.md"
 # Windows 11 and Python 3.14 are this project's *single targets*, not floors.

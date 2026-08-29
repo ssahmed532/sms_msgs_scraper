@@ -25,10 +25,14 @@ from sms_msgs_scraper.sms_txn_query_tool import cli
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 LOCKFILE_PATH = REPO_ROOT / "uv.lock"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 PROJECT_NAME = "sms-msgs-scraper"
 
 SEMVER_PTTRN = re.compile(r"\d+\.\d+\.\d+")
+
+# A built wheel or sdist named in full, e.g. sms_msgs_scraper-2.2.0-py3-none-any.whl
+DIST_FILENAME_PTTRN = re.compile(r"sms_msgs_scraper-\d+\.\d+\.\d+")
 
 
 def projectVersion() -> str:
@@ -59,6 +63,24 @@ class TestVersionSources(unittest.TestCase):
         )
         self.assertEqual(reported.group(1), projectVersion())
 
+    def test_the_ci_workflow_names_no_version_of_its_own(self):
+        """The third place the number used to drift, and the quietest.
+
+        CI's installed-wheel smoke test named `sms_msgs_scraper-2.0.0-...whl`
+        outright. Two releases later that file no longer existed, so the step
+        could only fail -- and it would have failed complaining about a missing
+        path rather than about a stale version, which is the kind of red build
+        people learn to route around. The workflow now discovers the wheel it
+        just built; this makes sure nobody writes the name back in.
+        """
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            DIST_FILENAME_PTTRN.findall(workflow),
+            [],
+            "CI names a built artefact by version -- discover it instead",
+        )
+
     def test_the_lockfile_matches_pyproject(self):
         """The one nothing prompts you to update.
 
@@ -86,8 +108,8 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_patch_one_over_the_2_1_0_interface(self):
-        """2.1.1, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_minor_one_over_the_2_1_1_interface(self):
+        """2.2.0, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -96,17 +118,22 @@ class TestReleaseShape(unittest.TestCase):
 
         2.1.0 was MINOR: it added `cc_spend_for_month` and took nothing away.
 
-        2.1.1 moves five modules into the subpackages they belong to and splits
-        the bank registry so the domain no longer imports the parsing layer. Not
-        one command, option, default or output stream changed, and the reference
-        corpus reproduces every count and every exact total -- so it is a PATCH
-        however many files it touched. Judging it from the outside is the whole
-        rule; pinning the number here is what forces that judgement to be made
-        deliberately at each release rather than skipped.
+        2.1.1 was a PATCH: five modules moved into the subpackages they belong
+        to and the bank registry split, with no command, option, default or
+        output stream changed.
+
+        2.2.0 adds vendor search (`--vendor`), canonical vendor names
+        (`--canonical-vendors`) and the table behind them (`--vendor-map`). It
+        is MINOR rather than MAJOR precisely because canonicalization is opt-in:
+        a run that does not ask for it sees the same vendor strings, the same
+        row counts and the same totals it saw in 2.1.1, and the reference corpus
+        reproduces every number in CLAUDE.md unchanged. Making it the default
+        would have been the MAJOR: `list_all_vendors` would return 271 rows
+        where it used to return 359, and every script counting them would break.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "1", "1"))
+        self.assertEqual((major, minor, patch), ("2", "2", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

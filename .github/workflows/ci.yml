@@ -45,9 +45,17 @@ jobs:
           uv run --with coverage coverage report
 
       - name: Installed-wheel smoke test
+        shell: pwsh
+        # The wheel's filename carries the version, so it must not be written
+        # out here. Pinned to a literal it went stale at 2.1.0, and this step
+        # would then fail on a file that no longer exists -- a red build for a
+        # reason that has nothing to do with the change being tested.
+        # Discovered instead, and `tests/test_versioning.py` refuses to let a
+        # literal come back.
         run: |
           uv build
-          uv run --no-project --with dist/sms_msgs_scraper-2.0.0-py3-none-any.whl sms-txn --version
+          $wheel = Get-ChildItem dist/*.whl | Select-Object -First 1
+          uv run --no-project --with $wheel.FullName sms-txn --version
 
   # The real corpus is one person's financial history. It is never committed and
   # never reaches CI, so verifying against it stays a local step -- run

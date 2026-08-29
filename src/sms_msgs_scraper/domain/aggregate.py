@@ -24,6 +24,33 @@ def monthKeyFor(txn) -> str:
     return txn.date.strftime(MONTH_KEY_FMT)
 
 
+def txnSortKey(txn):
+    """The documented total order for a transaction listing.
+
+    Output order used to be whatever order the messages happened to sit in the
+    XML file, which is stable for one file and meaningless across two. Sorting
+    on the transaction's own timestamp makes a listing comparable between runs,
+    between merged backups and between exports.
+
+    The tie-breakers exist to make the order *total*: many transactions share a
+    timestamp, and HBL and SCB alerts carry a date only, so a great many share
+    midnight on the same day. Bank, vendor, currency and amount resolve those
+    deterministically.
+
+    It lives here, rather than privately in the orchestrator that first sorts a
+    report, because *vendor* is one of the tie-breakers: rewriting vendors to
+    their canonical names can reorder a listing, so anything that rewrites them
+    has to be able to restore the order this defines.
+    """
+    return (
+        txn.date,
+        txn.bank,
+        txn.vendor,
+        txn.money.currency,
+        txn.money.amount,
+    )
+
+
 def totalsByGroup(txns, keyFor) -> dict[str, dict[str, Money]]:
     """Exact totals per group, per currency, grouping by whatever `keyFor`
     returns.

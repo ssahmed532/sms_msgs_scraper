@@ -8,20 +8,28 @@ spot stayed certified for so long.
 
 This runs the same shape of check against `fixtures/synthetic_backup.xml`:
 entirely invented data, real message templates, every skip path, both short
-codes of every bank that has two. It cannot catch a regression that only shows
+codes of every bank that has two, and one merchant spelled four ways so
+canonicalization has something to collapse. It cannot catch a regression that only shows
 up at scale -- that is still the private-corpus job -- but it does catch a
 template, a route or an amount rule that has stopped working at all.
 
 Regenerate the fixture with `tests/fixtures/build_synthetic_backup.py`, then
 update the expectations here from what it produces.
+
+**This is the one file that pins numbers about the fixture**, and it should
+stay that way. `test_adversarial_cli.py` reads the same file but asserts only
+that there was something to compare; keeping the counts in one place is what
+makes a fixture edit a one-file change.
 """
 
 import unittest
 from collections import Counter
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord
+from sms_msgs_scraper.domain.vendors import VendorAliasMap
 from sms_msgs_scraper.parser.registry import REGISTRY
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
 
@@ -40,14 +48,14 @@ class TestEnvelope(SyntheticCorpusTestCase):
     def test_the_declared_count_matches_what_the_file_holds(self):
         envelope = self.report.envelope
 
-        self.assertEqual(envelope.declared, 28)
-        self.assertEqual(envelope.actual, 28)
+        self.assertEqual(envelope.declared, 31)
+        self.assertEqual(envelope.actual, 31)
         self.assertTrue(envelope.matchesDeclared)
 
     def test_records_are_accounted_for_exactly_once(self):
         envelope = self.report.envelope
 
-        self.assertEqual(envelope.sms, 27)
+        self.assertEqual(envelope.sms, 30)
         self.assertEqual(envelope.mms, 1)
         self.assertEqual(envelope.invalid, 0)
         self.assertEqual(
@@ -61,7 +69,7 @@ class TestEnvelope(SyntheticCorpusTestCase):
         reference backup's 4,719 records as 5,040 and called its 321 nested MMS
         children malformed messages.
         """
-        self.assertEqual(self.report.envelope.actual, 28)
+        self.assertEqual(self.report.envelope.actual, 31)
 
 
 class TestRoutingAndConservation(SyntheticCorpusTestCase):
@@ -72,7 +80,7 @@ class TestRoutingAndConservation(SyntheticCorpusTestCase):
         )
 
     def test_the_per_bank_message_counts(self):
-        expected = {"HBL": 5, "FBL": 6, "SCB": 5, "MEZN": 8, "OTHER": 1, "DUP": 2}
+        expected = {"HBL": 7, "FBL": 6, "SCB": 6, "MEZN": 8, "OTHER": 1, "DUP": 2}
 
         for bucket, count in expected.items():
             with self.subTest(bucket=bucket):
@@ -117,10 +125,10 @@ class TestDiscovery(SyntheticCorpusTestCase):
 
 class TestExtraction(SyntheticCorpusTestCase):
     def test_the_credit_card_txn_counts(self):
-        self.assertEqual(len(self.report.ccTxns), 11)
+        self.assertEqual(len(self.report.ccTxns), 14)
         self.assertEqual(
             Counter(txn.bank for txn in self.report.ccTxns),
-            Counter({"HBL": 4, "FBL": 4, "SCB": 3}),
+            Counter({"HBL": 6, "FBL": 4, "SCB": 4}),
         )
 
     def test_every_debit_type_is_represented(self):
@@ -177,12 +185,12 @@ class TestExactTotals(SyntheticCorpusTestCase):
 
     def test_the_exact_per_bank_per_currency_totals(self):
         expected = {
-            ("HBL", "PKR"): Decimal("51340.98"),
+            ("HBL", "PKR"): Decimal("55340.98"),
             ("HBL", "USD"): Decimal("4.02"),
             ("FBL", "PKR"): Decimal("26398.90"),
             ("FBL", "USD"): Decimal("39.99"),
             ("FBL", "CAD"): Decimal("12.50"),
-            ("SCB", "PKR"): Decimal("13050.90"),
+            ("SCB", "PKR"): Decimal("16550.90"),
             ("MEZN", "PKR"): Decimal("187351.00"),
         }
 
@@ -230,6 +238,125 @@ class TestDuplicates(SyntheticCorpusTestCase):
 
         ambiguous = [dup for dup in self.report.duplicates if dup.ambiguous]
         self.assertEqual(ambiguous[0].sender, "4250")
+
+
+class TestCanonicalVendorsAtCorpusScale(SyntheticCorpusTestCase):
+    """One merchant, four spellings, three of the ways a real one varies.
+
+    The fixture spells a single service station four ways across three sender
+    codes: with a station number, with a trailing city, with that city glued
+    straight on with no space, and truncated mid-word by the issuer. Those are
+    the real failure modes from the reference corpus, reproduced in data that
+    can be committed.
+
+    The table used here is local to the test rather than the one shipped in
+    `data/vendor_aliases.json`. That table was derived from the private corpus
+    and asserts against it in `scripts/verify_against_backup.py`; wiring it to
+    this fixture as well would couple two corpora that have no merchants in
+    common. What is checked here is the *mechanism* at corpus scale.
+    """
+
+    # The truncated spelling is the shortest, so it is also the only prefix
+    # that can claim all four.
+    ALIAS_MAP = {
+        "schemaVersion": 1,
+        "canonicalVendors": {
+            "SYNTHETIC SERVICE STATION": {
+                "note": "Four spellings across HBL 4250, HBL 14250, SCB 7220 and SCB 9220.",
+                "prefix": ["SYNTHETIC SERVICE STAT"],
+            }
+        },
+    }
+
+    def setUp(self):
+        self.aliases = VendorAliasMap.fromDict(self.ALIAS_MAP)
+
+    def _spellings(self):
+        return {
+            txn.vendor
+            for txn in self.report.ccTxns
+            if txn.vendor.upper().startswith("SYNTHETIC SERVICE STAT")
+        }
+
+    def test_the_fixture_really_does_hold_four_spellings_of_one_merchant(self):
+        """Asserted separately, so a fixture edit that removes a spelling fails
+        here rather than quietly weakening every test below it."""
+        self.assertEqual(
+            self._spellings(),
+            {
+                "SYNTHETIC SERVICE STATION 7",
+                "SYNTHETIC SERVICE STATION 7 Karachi PAK",
+                "SYNTHETIC SERVICE STATIONKarachi PAK",
+                "SYNTHETIC SERVICE STAT",
+            },
+        )
+
+    def test_all_four_collapse_to_one_canonical_name(self):
+        self.assertEqual(
+            {self.aliases.canonicalFor(vendor) for vendor in self._spellings()},
+            {"SYNTHETIC SERVICE STATION"},
+        )
+
+    def test_they_span_more_than_one_bank_and_more_than_one_short_code(self):
+        """The grouping is worth having precisely because it crosses issuers:
+        no single bank's messages show the problem on their own."""
+        banks = {
+            txn.bank
+            for txn in self.report.ccTxns
+            if txn.vendor.upper().startswith("SYNTHETIC SERVICE STAT")
+        }
+
+        self.assertEqual(banks, {"HBL", "SCB"})
+
+    def test_canonicalization_leaves_every_other_vendor_untouched(self):
+        others = {
+            txn.vendor
+            for txn in self.report.ccTxns
+            if not txn.vendor.upper().startswith("SYNTHETIC SERVICE STAT")
+        }
+
+        for vendor in others:
+            with self.subTest(vendor=vendor):
+                self.assertEqual(self.aliases.canonicalFor(vendor), vendor)
+
+    def test_it_regroups_spending_without_changing_any_of_it(self):
+        """The invariant that matters at corpus scale.
+
+        Renaming vendors must move no money. The rewrite is done the way the
+        CLI does it -- `replace` on a frozen transaction -- and the totals are
+        taken per currency on both sides, so this compares two genuinely
+        different objects rather than one value with itself.
+        """
+        canonical = [
+            replace(txn, vendor=self.aliases.canonicalFor(txn.vendor))
+            for txn in self.report.ccTxns
+        ]
+
+        # the rewrite really did happen: four spellings became one name
+        self.assertEqual(len({txn.vendor for txn in self.report.ccTxns}), 14)
+        self.assertEqual(len({txn.vendor for txn in canonical}), 11)
+
+        before = Counter()
+        for txn in self.report.ccTxns:
+            before[txn.money.currency] += txn.money.amount
+
+        after = Counter()
+        for txn in canonical:
+            after[txn.money.currency] += txn.money.amount
+
+        self.assertEqual(before, after)
+        # HBL 55,340.98 + FBL 26,398.90 + SCB 16,550.90
+        self.assertEqual(after["PKR"], Decimal("98290.78"))
+        self.assertEqual(len(canonical), len(self.report.ccTxns))
+
+    def test_the_shipped_table_says_nothing_about_this_fixture(self):
+        """Which is the designed behaviour for any backup it was not derived
+        from: an unclaimed vendor passes through exactly as the bank sent it."""
+        shipped = VendorAliasMap.loadDefault()
+
+        for txn in self.report.ccTxns:
+            with self.subTest(vendor=txn.vendor):
+                self.assertEqual(shipped.canonicalFor(txn.vendor), txn.vendor)
 
 
 class TestReportRoundTrip(SyntheticCorpusTestCase):

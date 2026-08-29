@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.1.1.
+**Version:** 2.2.0.
 
 ### Semantic versioning is mandatory
 
@@ -99,6 +99,11 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 # list_all_debit_txns also accepts:
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
 #
+# ALL SIX accept the vendor pair:
+#   --vendor TEXT                  - case-insensitive substring, matched against
+#                                    the vendor as sent AND its canonical name
+#   --canonical-vendors            - report vendors under their canonical names
+#
 # Both monthly summary commands and cc_spend_for_month accept --verbose / -v.
 #
 # GLOBAL options must be written BEFORE the filepath, because a Click group
@@ -107,6 +112,7 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #   --quiet / -q                   - suppress everything on stderr
 #   --strict                       - exit 3 if anything could not be parsed
 #   --duplicates {exact,none,review}
+#   --vendor-map PATH              - a vendor alias table replacing the shipped one
 #   --no-color
 ```
 
@@ -115,6 +121,8 @@ uv run sms-txn backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024
 uv run sms-txn backup.xml list_all_cc_txns --bank FBL
 uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
 uv run sms-txn --format csv backup.xml list_all_debit_txns --txn-type atm_withdrawal > atm.csv
+uv run sms-txn backup.xml list_all_cc_txns --vendor PSO
+uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-vendors
 ```
 
 `python -m sms_msgs_scraper` is equivalent to `sms-txn` and works from a source checkout.
@@ -129,7 +137,7 @@ uv run python scripts/verify_against_backup.py other.xml
 Run this after **any** change to a parser, to the routing, or to the dedup identity. The unit suite
 proves the parsers work on hand-built msgs; this proves they still work on ~4,700 real ones.
 
-It performs three kinds of check, and the first is the one that matters most:
+It performs four kinds of check, and the first is the one that matters most:
 
 - **Discovery.** It scans *every* sender for the banks' txn signatures **without consulting the
   registry's sender list**, and fails on a signature from a sender no bank claims. This check is
@@ -140,6 +148,14 @@ It performs three kinds of check, and the first is the one that matters most:
 - **Expected values**, tied to one backup by its SHA-256 — counts *and* exact per-bank
   per-currency `Decimal` totals. Counts alone cannot catch an amount parsed wrongly: 1,696 txns
   summing to the wrong number is still 1,696 txns.
+- **Vendor map liveness.** Every alias must claim at least one real vendor, and every canonical
+  name must collapse two or more spellings. An alias matching nothing is dead config — written
+  against a string the banks stopped sending, or mistyped — and it would otherwise sit there looking
+  like it grouped something. Read from `vendor_aliases.local.json` in the repo root (gitignored,
+  and the file `--vendor-map` should point at); asserted only when that file *and* the reference
+  backup are both present, since the packaged examples match nothing anywhere by design and another
+  backup may simply lack a merchant. Only alias and canonical *names* are printed, never a corpus
+  vendor string.
 
 Output is counts and totals only. Parse diagnostics are typed values on the report now, so nothing
 needs to capture stdout to keep msg bodies out of the output.
@@ -199,6 +215,8 @@ sms_msgs_scraper/
 │       ├── __main__.py           # python -m sms_msgs_scraper
 │       ├── sms_txn_query_tool.py # CLI entry point (rich_click)
 │       ├── sms_backup_file_parser.py  # orchestrator
+│       ├── data/
+│       │   └── vendor_aliases.json    # EXAMPLE canonical-vendor table (no real data)
 │       ├── domain/               # the core: stdlib only, imports nothing above it
 │       │   ├── money.py          # Money, the amount grammar, minor units
 │       │   ├── types.py          # CardReference
@@ -209,7 +227,8 @@ sms_msgs_scraper/
 │       │   ├── diagnostics.py    # SkipReason, ParseDiagnostic, ParseResult
 │       │   ├── report.py         # ParseReport, EnvelopeCounts, DuplicatePolicy
 │       │   ├── bank.py           # BankSpec, BankRegistry, Capability, TxnKind
-│       │   └── aggregate.py      # exact totals over Money
+│       │   ├── vendors.py        # VendorAliasMap, the canonical-name lookup
+│       │   └── aggregate.py      # exact totals over Money, and txnSortKey
 │       ├── parser/
 │       │   ├── registry.py       # BANK_SPECS, REGISTRY — the only sender list
 │       │   ├── hbl_sms_parser.py
@@ -232,6 +251,7 @@ sms_msgs_scraper/
     ├── test_scb_sms_parser.py / test_mezn_sms_parser.py
     ├── test_sms_backup_file_parser.py
     ├── test_cli_commands.py / test_date_range_filter.py
+    ├── test_vendors.py / test_vendor_filter.py
     ├── test_adversarial_input.py / test_adversarial_cli.py
     ├── test_import_layering.py
     ├── test_synthetic_corpus.py
@@ -255,7 +275,7 @@ render  console_ui.py  ·  tables.py  ·  machine.py
 parser  registry.py (BANK_SPECS)  ·  hbl / fbl / scb / mezn _sms_parser.py
   ↓
 domain  money · types · tz · message · cc_txn · debit_txn · diagnostics · report
-        · bank · aggregate                        ← stdlib only, imports nothing above
+        · bank · vendors · aggregate              ← stdlib only, imports nothing above
 ```
 
 ```
@@ -263,13 +283,15 @@ sms_txn_query_tool.py (CLI, rich_click)
     ├── render/console_ui.py (consoles, theme, cell helpers)
     ├── render/tables.py     (Rich tables)
     ├── render/machine.py    (JSON, CSV)
-    ├── domain/aggregate.py  (exact totals over Money)
+    ├── domain/aggregate.py  (exact totals over Money, the output order)
+    ├── domain/vendors.py    (--vendor, --canonical-vendors, --vendor-map)
     ├── parser/registry.py   (--bank choices)
     └── sms_backup_file_parser.py (orchestrator)
             ├── parser/registry.py   ──→ parser/*   (signal + extract callables)
             ├── domain/bank.py       (Capability, TxnKind)
             ├── domain/message.py    (SmsRecord)
             ├── domain/diagnostics.py
+            ├── domain/aggregate.py  (txnSortKey — the output order)
             └── domain/report.py     ──→ domain/cc_txn.py, domain/debit_txn.py
                                      ──→ domain/money.py
 
@@ -314,6 +336,31 @@ Routing, `--bank` choices, summary rows and the verifier all derive from it. Reg
 `DuplicateSenderError` if two banks claim one sender. `Capability.TXN_TIME` is what decides whether
 a suppressed duplicate is ambiguous.
 
+**`domain/vendors.py`** — `VendorAliasMap`, and the only place a vendor name is ever rewritten.
+
+One canonical name owns two or more aliases, each an `exact` full vendor string or a `prefix` of
+one. The prefix form is load-bearing rather than convenient: an SSGC bill embeds its own consumer
+number and a bank-truncated name has no fixed ending, so neither can be enumerated exactly.
+
+**`data/vendor_aliases.json` ships the mechanism, not anyone's data.** Three worked examples of the
+two alias forms, every name marked `EXAMPLE`, claiming no real merchant — the file exists so the
+schema documents itself, JSON having no comments. A real table is a private file passed to
+`--vendor-map`, kept out of this public repository exactly as the reference backup is: a list of the
+merchants, schools, hospitals and utilities someone actually pays is a map of their life.
+`tests/test_vendors.py::TestThePackagedMap.test_it_carries_examples_and_nothing_else` fails if a
+non-EXAMPLE entry ever lands there, so this is enforced rather than remembered.
+
+**Nothing is inferred.** No suffix stripping, no fuzzy distance, no "looks like a city" rule — each
+of those mis-attributes spending the first time a real merchant name ends in something city-shaped.
+Only case and runs of internal whitespace are normalized, because neither can carry meaning. A
+vendor no alias claims comes back *exactly* as the bank sent it.
+
+Loading is strict for the same reason the registry's is: every way a map can be subtly wrong is
+silent. A misspelled entry key, an alias two canonical names both claim, an entry with no aliases —
+none of those raise on their own, they just group less than the file appears to say. The longest
+matching prefix wins, so one entry can refine another; two canonical names claiming *the same*
+alias is refused outright, because that is a question the file does not answer.
+
 **`domain/diagnostics.py`** — a parse failure is a *value*, not a `print()`. `ParseDiagnostic` has
 no field a msg body would fit in: it carries a `SkipReason` from a closed vocabulary plus a locator
 built from the sender and the received timestamp. `ParseResult` is either a txn, a diagnostic, or —
@@ -355,7 +402,9 @@ rule both candidate timestamps out.
 
 **Output order is a contract.** Txns are sorted by `(date, bank, vendor, currency, amount)`. The
 tie-breakers make the order *total*: HBL and SCB alerts carry a date only, so a great many txns
-share midnight on the same day.
+share midnight on the same day. The key is `txnSortKey` in `domain/aggregate.py`, not private to
+the orchestrator, because *vendor* is one of those tie-breakers: `--canonical-vendors` rewrites
+vendors and so must re-sort, or the listing silently leaves the order the tool documents.
 
 ### Bank Short Codes
 
@@ -414,7 +463,33 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
 5. Add a `BankSpec` to `BANK_SPECS` in `parser/registry.py`, with its sender codes and capabilities.
    That is the only registration step — routing, `--bank`, the summary and the verifier all follow.
 6. Add `tests/test_<bank>_sms_parser.py`, and add messages to
-   `tests/fixtures/build_synthetic_backup.py`.
+   `tests/fixtures/build_synthetic_backup.py`. Regenerate the fixture by running that
+   file, then update the expectations in **`tests/test_synthetic_corpus.py` and nowhere
+   else** — derive each number from what you added, then confirm the code agrees. No
+   other test may pin a count taken from the fixture; `tests/test_adversarial_cli.py`
+   reads it but deliberately asserts only that it is non-empty, because a second copy of
+   the counts once turned a one-message fixture edit into failures in two files.
+
+### Adding a canonical vendor
+
+1. Read the spellings the banks actually sent — that is what an alias has to match, and guessing at
+   it is how a dead entry gets written:
+   `uv run sms-txn --quiet --format csv backup.xml list_all_vendors`
+2. Add an entry to **`vendor_aliases.local.json`** in the repo root — gitignored, and what
+   `--vendor-map` should point at. Use `exact` for a full vendor string and `prefix` where a bill
+   number, a station number or a truncation varies. Put the grounds in `note` — JSON has no
+   comments, and an entry that groups two spellings on a judgement should say so.
+   **Never add a real merchant to the packaged `data/vendor_aliases.json`**; it carries examples
+   only, and a test enforces that.
+3. **Prefer the narrowest alias that covers the family.** A broad prefix silently claims merchants
+   that merely start with the same word, and mis-attributed spending looks exactly like real
+   spending. `SHELL` is a prefix of a great many things that are not the fuel brand.
+4. **Nothing derived from a real backup gets committed** — this repository is public. That covers
+   third parties (Meezan's funds-transfer payees are largely individuals) and the account holder
+   equally: a school, a hospital and a utility together locate a person. All of it belongs in the
+   local file.
+5. Re-run `uv run python scripts/verify_against_backup.py`. It fails on a dead alias, on a canonical
+   name that collapses fewer than two spellings, and on two canonical names claiming one alias.
 
 ## Conventions
 
@@ -465,6 +540,13 @@ raw-corpus grep will always be higher and is not comparable.
 | unique CC vendor union (HBL ∪ FBL ∪ SCB) | 359 |
 | FBL currency split PKR / USD / CAD | 574 / 8 / 1 |
 | ambiguous duplicates | 31 |
+| `vendor_aliases.local.json` aliases / canonical names | 69 / 58 |
+| raw vendor strings (CC ∪ debit) → canonical | 545 → 431 |
+| unique CC vendors under `--canonical-vendors` | 271 |
+
+The three vendor rows describe **`vendor_aliases.local.json`**, the private table, not the packaged
+examples — which claim nothing and collapse nothing. That file is not in the repository, so these
+three are the only reference numbers a fresh clone cannot reproduce.
 
 Exact totals (`Decimal`, asserted by the verifier):
 
@@ -528,7 +610,27 @@ record the derivation.** Never quietly edit this table to match observed output.
 - **Meezan cheque-clearing debits are deliberately out of scope** — they risk double-counting
   against the separate "cheque received" notice.
 - **`list_all_debit_vendors` does not exist.** `debitVendors` is populated and the command would be
-  trivial; it was simply not asked for.
+  trivial; it was simply not asked for. `list_all_debit_txns --vendor X` covers the search case.
+
+- **Canonicalization is opt-in, and that is a deliberate interface decision, not timidity.** Making
+  it the default would change what `list_all_vendors` returns (359 → 271 CC vendors) and would be a
+  MAJOR release under this project's own rule. `--canonical-vendors` regroups; it never changes an
+  amount, a transaction count or a total, and `test_vendor_filter.py` pins that.
+
+- **The packaged alias table groups nothing.** It ships three worked examples so the schema
+  documents itself, and claims no real merchant, so out of the box `--canonical-vendors` is a no-op.
+  That is deliberate: this repository is public, and a table of the merchants, schools, hospitals
+  and utilities someone actually pays is a map of their life. The real table is
+  `vendor_aliases.local.json`, gitignored, passed with `--vendor-map` and read automatically by the
+  verifier. A merchant no table claims passes through with the string the bank sent.
+
+- **A canonical name is matched case-insensitively but rendered exactly as written in the file.**
+  Two entries whose names differ only in case are refused on load, because a lookup folds case and
+  so could never tell them apart.
+
+- **`--vendor` is a substring match, so a short needle over-matches.** `--vendor PSO` also matches a
+  merchant with `PSO` anywhere in its name. This is the intended trade: the alternative — exact
+  equality — cannot find `PSO SERVICE STATION 7Karachi PAK` from the word a person would type.
 - **A tz test cannot fail on a machine already set to +05:00** — `astimezone()` is a no-op there.
   Windows offers no way to simulate another timezone in-process, so the stamping rule is enforced by
   convention, by review, and by the verifier's tz-aware invariant.

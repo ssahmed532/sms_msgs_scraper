@@ -15,6 +15,20 @@ sender, and an MMS element with nested children.
 
 Regenerate it whenever a template is added, then re-run the synthetic corpus
 test and update its expectations from the derivation printed there.
+
+**Expectations about this fixture live in exactly one file:
+`tests/test_synthetic_corpus.py`.** Derive each new number from what you added
+-- three messages worth PKR 1,500, 2,500 and 3,500 move three counts and two
+totals by knowable amounts -- and then confirm the code agrees, rather than
+copying whatever the run printed. That is the same anti-drift rule
+`scripts/verify_against_backup.py` states for the real corpus.
+
+`tests/test_adversarial_cli.py` reads this fixture too, but asserts no count
+taken from it, by design. It used to carry its own copy of the transaction
+count, so a single message added here failed two files -- the second one being
+about `python -O` parity and stream contracts, which had nothing to do with the
+change. If an edit here makes something in that file fail, the fix is to remove
+the number from it, not to update it.
 """
 
 import xml.etree.ElementTree as ET
@@ -59,7 +73,25 @@ MESSAGES = [
         "at SYNTHETIC SUPERMART for PKR-25,170.49 on 01/Oct/2023.",
         "Oct 1, 2023 9:58:00 PM",
     ),
+    (
+        # one merchant, spelled four ways across this fixture. Here with a
+        # station number; on 14250 with a city suffix as well; on SCB 7220 with
+        # that city glued straight on; on SCB 9220 truncated mid-word. Nothing
+        # but an alias table can tell that these are one merchant.
+        "4250",
+        "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
+        "at SYNTHETIC SERVICE STATION 7 for PKR-1,500.00 on 04/Oct/2023.",
+        "Oct 4, 2023 8:00:00 AM",
+    ),
     # --------------------------------------------------------------- HBL 14250
+    (
+        # the same merchant again, this time with a trailing city and country
+        "14250",
+        "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
+        "at SYNTHETIC SERVICE STATION 7 Karachi PAK for PKR-2,500.00 on "
+        "05/Oct/2023.",
+        "Oct 5, 2023 8:30:00 AM",
+    ),
     (
         # the short code HBL migrated to in January 2025
         "14250",
@@ -145,6 +177,15 @@ MESSAGES = [
         "PAK on 07-09-25 using Credit Card no 5452xxxxxxxx1280. Avail Limit "
         "PKR40000.00. SCBPL",
         "Sep 7, 2025 5:00:00 PM",
+    ),
+    (
+        # the same merchant a fourth time, truncated mid-word by the issuer --
+        # the shape no suffix rule could ever repair
+        "9220",
+        "Dear Client, PKR 3,500.00 have been paid at SYNTHETIC SERVICE STAT on "
+        "06-10-23 using Credit Card no 5452xxxxxxxx1280. Avail Limit "
+        "PKR40000.00. SCBPL",
+        "Oct 6, 2023 9:00:00 AM",
     ),
     # --------------------------------------------------------------- MEZN 8079
     (
