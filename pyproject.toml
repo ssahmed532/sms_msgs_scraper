@@ -1,25 +1,68 @@
 [project]
 name = "sms-msgs-scraper"
-version = "1.1.0"
-description = "Parse and analyze credit card transaction SMS messages from Pakistani banks"
+version = "2.0.0"
+description = "Parse and analyze bank transaction SMS messages from Pakistani banks: credit card purchases, account debits, ATM withdrawals, bill payments and funds transfers"
+readme = "README.md"
+# Windows 11 and Python 3.14 are this project's *single targets*, not floors.
+# It deliberately carries no cross-platform branches and no back-compatibility
+# shims, so widening this would mean adding exactly the code the project has
+# chosen not to maintain. The constraint is a decision, not an oversight.
 requires-python = ">=3.14"
 dependencies = [
     "click==8.4.2",
     # Windows ships no system IANA tz database and uv-managed interpreters
-    # bundle none, so the module-scope ZoneInfo("Asia/Karachi") calls in
-    # common.py / cc_txn.py raise ZoneInfoNotFoundError without this.
+    # bundle none, so the module-scope ZoneInfo("Asia/Karachi") in common.py
+    # raises ZoneInfoNotFoundError without this.
     # Bump periodically — this is the tz rule database, not just a library.
     "tzdata==2026.3",
-    # Every line this tool prints goes through a Rich console: themed tables,
-    # colour-coded by bank / currency / txn type, and warnings that read as
-    # warnings. See src/console_ui.py.
+    # Rich renders the tables, the parse summary and the diagnostics. It is a
+    # renderer only: nothing in the parsing layer imports it.
     "rich==15.0.0",
     # Rich rendering for Click's own --help and usage errors. It is a drop-in
     # `import rich_click as click`, so the commands themselves are unchanged.
     "rich-click==1.9.8",
 ]
 
-# There is no importable package here — src/ is a flat script directory and
-# imports resolve because Python puts the script's own directory on sys.path.
-[tool.uv]
-package = false
+[project.scripts]
+sms-txn = "sms_msgs_scraper.sms_txn_query_tool:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sms_msgs_scraper"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py314"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    # This codebase names methods and variables in camelCase throughout. That is
+    # an explicit, documented convention (see CLAUDE.md), not an accident, and
+    # renaming ~2,000 identifiers to satisfy a linter would be the largest and
+    # least valuable diff in the project's history.
+    "N802",
+    "N803",
+    "N806",
+    # Long lines inside the explanatory comments this codebase leans on.
+    "E501",
+]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+reportMissingImports = "error"
+
+[tool.coverage.run]
+branch = true
+source = ["src/sms_msgs_scraper"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true

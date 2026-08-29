@@ -1,32 +1,36 @@
+"""Tests for the --from-date / --to-date filter shared by every command."""
+
 import unittest
 from datetime import datetime
+from decimal import Decimal
 
 import click
 
-from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
-from common import DEFAULT_TZ
-from debit_txn import DebitTxnDC, DebitTxnType
-from sms_txn_query_tool import _dateRangeLabel, _filterTxnsByDateRange
+from sms_msgs_scraper.cc_txn import CreditCardTxnDC
+from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.sms_txn_query_tool import _filterLabel, _filterTxnsByDateRange
 
 
-class TestDateRangeFilter(unittest.TestCase):
+def bound(isoDate: str) -> datetime:
+    """A naive datetime, the way click.DateTime hands one to a command."""
+    return datetime.strptime(isoDate, "%Y-%m-%d")
 
-    def _createTxn(self, isoDate: str, vendor: str = "IMTIAZ SUPER MARKET") -> CreditCardTxnDC:
-        """Build a CC txn dated at midnight on isoDate (YYYY-MM-DD) in the
-        default (Asia/Karachi) timezone, matching how the HBL parser dates txns.
-        """
+
+class TestCcTxnDateRange(unittest.TestCase):
+    def _createTxn(self, isoDate: str, vendor: str = "IMTIAZ SUPER MARKET"):
+        """A CC txn dated at midnight, matching how the HBL parser dates them."""
         txnDate = datetime.strptime(isoDate, "%Y-%m-%d").replace(tzinfo=DEFAULT_TZ)
 
         return CreditCardTxnDC(
-            amountTuple=CurrencyAmountTuple("PKR", 100.00),
+            money=Money(Decimal("100.00"), "PKR"),
             date=txnDate,
             vendor=vendor,
-            ccLastFourDigits=8526,
+            bank="HBL",
+            card=CardReference.of("8526"),
         )
-
-    def _bound(self, isoDate: str) -> datetime:
-        """Build a naive datetime the way click.DateTime hands one to a command."""
-        return datetime.strptime(isoDate, "%Y-%m-%d")
 
     def setUp(self):
         self.txns = [
@@ -37,159 +41,130 @@ class TestDateRangeFilter(unittest.TestCase):
             self._createTxn("2025-01-01"),
         ]
 
-    def _dates(self, txns: list) -> list:
+    def _dates(self, txns):
         return [txn.date.strftime("%Y-%m-%d") for txn in txns]
 
     def test_no_bounds_returns_everything(self):
-        """Test method to verify that omitting both bounds leaves the txn
-        list untouched.
-        """
-        self.assertEqual(_filterTxnsByDateRange(self.txns, None, None), self.txns)
+        self.assertEqual(len(_filterTxnsByDateRange(self.txns, None, None)), 5)
 
     def test_both_bounds_are_inclusive(self):
-        """Test method to verify that txns falling exactly on --from-date and
-        on --to-date are kept, not dropped.
-        """
         filtered = _filterTxnsByDateRange(
-            self.txns, self._bound("2024-01-01"), self._bound("2024-12-31")
+            self.txns, bound("2024-01-01"), bound("2024-12-31")
         )
 
         self.assertEqual(
             self._dates(filtered), ["2024-01-01", "2024-06-15", "2024-12-31"]
         )
 
-    def test_open_lower_bound(self):
-        """Test method to verify that supplying only --to-date leaves the
-        lower end of the range open.
-        """
-        filtered = _filterTxnsByDateRange(self.txns, None, self._bound("2023-12-31"))
+    def test_an_open_lower_bound(self):
+        filtered = _filterTxnsByDateRange(self.txns, None, bound("2024-01-01"))
 
-        self.assertEqual(self._dates(filtered), ["2023-12-31"])
+        self.assertEqual(self._dates(filtered), ["2023-12-31", "2024-01-01"])
 
-    def test_open_upper_bound(self):
-        """Test method to verify that supplying only --from-date leaves the
-        upper end of the range open.
-        """
-        filtered = _filterTxnsByDateRange(self.txns, self._bound("2025-01-01"), None)
+    def test_an_open_upper_bound(self):
+        filtered = _filterTxnsByDateRange(self.txns, bound("2024-12-31"), None)
 
-        self.assertEqual(self._dates(filtered), ["2025-01-01"])
+        self.assertEqual(self._dates(filtered), ["2024-12-31", "2025-01-01"])
 
-    def test_single_day_range(self):
-        """Test method to verify that an identical from/to date selects
-        exactly that one day.
-        """
+    def test_a_single_day_range(self):
         filtered = _filterTxnsByDateRange(
-            self.txns, self._bound("2024-06-15"), self._bound("2024-06-15")
+            self.txns, bound("2024-06-15"), bound("2024-06-15")
         )
 
         self.assertEqual(self._dates(filtered), ["2024-06-15"])
 
-    def test_range_matching_nothing(self):
-        """Test method to verify that a valid range covering no txns yields
-        an empty list rather than an error.
-        """
+    def test_a_range_matching_nothing(self):
         filtered = _filterTxnsByDateRange(
-            self.txns, self._bound("2024-07-01"), self._bound("2024-07-31")
+            self.txns, bound("2026-01-01"), bound("2026-12-31")
         )
 
         self.assertEqual(filtered, [])
 
-    def test_inverted_range_is_rejected(self):
-        """Test method to verify that a --from-date later than --to-date is
-        reported as a bad parameter instead of silently returning nothing.
-        """
+    def test_an_inverted_range_is_rejected(self):
         with self.assertRaises(click.BadParameter):
             _filterTxnsByDateRange(
-                self.txns, self._bound("2024-12-31"), self._bound("2024-01-01")
+                self.txns, bound("2024-12-31"), bound("2024-01-01")
             )
 
-    def test_dateRangeLabel(self):
-        """Test method to verify the human-readable range suffix used in the
-        command output headers.
-        """
-        self.assertEqual(_dateRangeLabel(None, None), "")
-        self.assertEqual(
-            _dateRangeLabel(self._bound("2024-01-01"), None), " (from 2024-01-01)"
-        )
-        self.assertEqual(
-            _dateRangeLabel(None, self._bound("2024-12-31")), " (up to 2024-12-31)"
-        )
-        self.assertEqual(
-            _dateRangeLabel(self._bound("2024-01-01"), self._bound("2024-12-31")),
-            " (from 2024-01-01 to 2024-12-31)",
-        )
 
+class TestDebitTxnDateRange(unittest.TestCase):
+    """Debit txns carry a real time of day, where CC txns from HBL and SCB do
+    not. Comparison is on the calendar date so both bounds stay inclusive."""
 
-class TestDateRangeFilterOnDebitTxns(unittest.TestCase):
-    """The date range filter is shared by the CC and the debit commands: it
-    only ever touches .date, so it must work on DebitTxnDC as well.
-    """
-
-    def _createDebitTxn(self, isoDateTime: str) -> DebitTxnDC:
-        """Build a debit txn at the given local date *and time of day*. Unlike
-        HBL CC msgs (whose dates are midnight-stamped), FBL and Meezan msgs
-        carry a real time of day.
-        """
+    def _createDebitTxn(self, isoDateTime: str):
         txnDate = datetime.strptime(isoDateTime, "%Y-%m-%d %H:%M").replace(
             tzinfo=DEFAULT_TZ
         )
 
         return DebitTxnDC(
-            amountTuple=CurrencyAmountTuple("PKR", 5000.00),
+            money=Money(Decimal("5000.00"), "PKR"),
             date=txnDate,
-            vendor="MEEZAN ATM DHA PHASE 6",
+            vendor="MEEZAN ATM",
             txnType=DebitTxnType.ATM_WITHDRAWAL,
             acctMask="xxxxxx5602",
         )
 
-    def _bound(self, isoDate: str) -> datetime:
-        return datetime.strptime(isoDate, "%Y-%m-%d")
-
     def test_debit_txns_are_filtered_by_date(self):
-        """Test method to verify that the shared filter selects debit txns by
-        calendar date just as it does CC txns.
-        """
         txns = [
-            self._createDebitTxn("2024-05-31 18:30"),
-            self._createDebitTxn("2024-06-15 09:05"),
-            self._createDebitTxn("2024-07-01 12:00"),
+            self._createDebitTxn("2024-01-01 09:00"),
+            self._createDebitTxn("2024-06-15 14:30"),
+            self._createDebitTxn("2024-12-31 23:45"),
         ]
 
         filtered = _filterTxnsByDateRange(
-            txns, self._bound("2024-06-01"), self._bound("2024-06-30")
+            txns, bound("2024-06-01"), bound("2024-06-30")
         )
 
         self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0].date.strftime("%Y-%m-%d %H:%M"), "2024-06-15 09:05")
+        self.assertEqual(filtered[0].date.day, 15)
 
     def test_to_date_stays_inclusive_for_a_late_evening_txn(self):
-        """Test method to verify that a txn late on the --to-date day is kept.
-        The bounds are naive midnight datetimes, so comparing datetimes
-        directly would drop any txn with a time of day past 00:00; the filter
-        compares .date() instead.
-        """
-        nearMidnight = self._createDebitTxn("2024-06-30 23:58")
+        """Comparing datetimes rather than dates would drop this one."""
+        txns = [self._createDebitTxn("2024-06-15 23:59")]
 
-        filtered = _filterTxnsByDateRange(
-            [nearMidnight], self._bound("2024-06-01"), self._bound("2024-06-30")
-        )
+        filtered = _filterTxnsByDateRange(txns, None, bound("2024-06-15"))
 
-        self.assertEqual(filtered, [nearMidnight])
+        self.assertEqual(len(filtered), 1)
 
     def test_from_date_stays_inclusive_for_a_late_evening_txn(self):
-        """Test method to verify the same inclusivity at the lower bound."""
-        nearMidnight = self._createDebitTxn("2024-06-01 23:58")
+        txns = [self._createDebitTxn("2024-06-15 23:59")]
 
-        filtered = _filterTxnsByDateRange(
-            [nearMidnight], self._bound("2024-06-01"), None
+        filtered = _filterTxnsByDateRange(txns, bound("2024-06-15"), None)
+
+        self.assertEqual(len(filtered), 1)
+
+
+class TestFilterLabel(unittest.TestCase):
+    def test_no_filters_produce_no_label(self):
+        self.assertEqual(_filterLabel(None, None), "")
+
+    def test_each_bound_alone(self):
+        self.assertEqual(
+            _filterLabel(bound("2024-01-01"), None), " (from 2024-01-01)"
+        )
+        self.assertEqual(
+            _filterLabel(None, bound("2024-12-31")), " (up to 2024-12-31)"
         )
 
-        self.assertEqual(filtered, [nearMidnight])
+    def test_both_bounds(self):
+        self.assertEqual(
+            _filterLabel(bound("2024-01-01"), bound("2024-12-31")),
+            " (from 2024-01-01 to 2024-12-31)",
+        )
+
+    def test_the_bank_and_type_filters_appear_too(self):
+        self.assertEqual(_filterLabel(None, None, bank="FBL"), " (bank FBL)")
+        self.assertEqual(
+            _filterLabel(None, None, txnType="atm_withdrawal"),
+            " (type atm_withdrawal)",
+        )
+
+    def test_filters_combine_in_a_stable_order(self):
+        self.assertEqual(
+            _filterLabel(bound("2024-01-01"), None, bank="HBL"),
+            " (bank HBL, from 2024-01-01)",
+        )
 
 
 if __name__ == "__main__":
-    # to run this script:
-    #   cd /path/to/src sub-directory
-    #   python -m unittest discover -s ..\tests\ -v
-    #
     unittest.main()

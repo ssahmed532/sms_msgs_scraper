@@ -1,470 +1,516 @@
-import re
+"""Tests for the CLI boundary: command wiring, the stdout/stderr contract,
+output formats and exit codes.
+"""
+
+import csv
+import io
+import json
 import tempfile
-import tomllib
 import unittest
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 from click.testing import CliRunner
 
-from cc_txn import CreditCardTxnDC, CurrencyAmountTuple
-from common import DEFAULT_TZ
-from sms_txn_query_tool import _filterTxnsByBank, _updateMonthlyTotals, cli
+from sms_msgs_scraper.sms_txn_query_tool import (
+    EXIT_STRICT_FAILURE,
+    cli,
+    list_all_cc_txns,
+    list_all_debit_txns,
+    list_all_vendors,
+    monthly_cc_spending_summary,
+    monthly_debit_spending_summary,
+)
+
+HBL_TXN_BODY = (
+    "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
+    "at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023."
+)
+FBL_TXN_BODY = (
+    "Dear JOHN DOE, your FBL Card  has been charged for USD 39.99 on "
+    "20-Sep-23 01:17:16 PM at AMAZON.COM             SEATTLE        US."
+)
+SCB_TXN_BODY = (
+    "Dear Client, PKR 12,450.90 have been paid at PSO SERVICE STATION 7Karachi "
+    "PAK on 29-09-23 using Credit Card no 5452xxxxxxxx1280. Avail Limit "
+    "PKR59563.45. SCBPL"
+)
+SCB_TRUNCATED_BODY = (
+    "Dear Client, PKR 281.00 have been paid at NECOS NATURAL STORE "
+)
+MEZN_ATM_BODY = (
+    "PKR 20,000.00 cash withdrawn from MEEZAN ATM DHA PHASE 6 from A/C "
+    "xxxxxx5602 KARACHI BRANCH on 15-Jun-24 at 09:05 Bal: PKR 1,234.00"
+)
 
 
-class TestCliCommandRegistration(unittest.TestCase):
+class CliTestCase(unittest.TestCase):
+    def setUp(self):
+        # A wide terminal so table cells are not wrapped mid-vendor. Rich reads
+        # COLUMNS, and at the default 80 a name like "IMTIAZ SUPER MARKET" is
+        # split across two rendered lines -- which says nothing about whether
+        # the value reached the table.
+        self.runner = CliRunner(env={"COLUMNS": "200"})
 
-    def test_subcommand_names_use_underscores(self):
-        """Test method to verify that the documented subcommand names are
-        registered verbatim. Click >=8.2 derives command names by
-        replacing underscores with dashes, so without the explicit name
-        string in @cli.command(...) the documented list_all_vendors
-        invocation would silently become list-all-vendors.
-        """
-        self.assertEqual(
-            set(cli.commands),
-            {
-                "list_all_vendors",
-                "list_all_cc_txns",
-                "monthly_cc_spending_summary",
-                "list_all_debit_txns",
-                "monthly_debit_spending_summary",
-            },
+    def _sms(self, address, body, readableDate="Oct 2, 2023 9:57:06 PM"):
+        sms = ET.Element("sms")
+        sms.set("address", address)
+        sms.set("body", body)
+        sms.set("readable_date", readableDate)
+
+        return sms
+
+    def _backup(self, msgElements=None, raw=None) -> Path:
+        tmpDir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpDir.cleanup)
+        backupPath = Path(tmpDir.name) / "sms_backup.xml"
+
+        if raw is not None:
+            backupPath.write_text(raw, encoding="utf-8")
+
+            return backupPath
+
+        root = ET.Element("smses")
+        root.set("count", str(len(msgElements)))
+        root.extend(msgElements)
+        ET.ElementTree(root).write(backupPath, encoding="utf-8")
+
+        return backupPath
+
+    def _standardBackup(self) -> Path:
+        return self._backup(
+            [
+                self._sms("4250", HBL_TXN_BODY),
+                self._sms("8756", FBL_TXN_BODY),
+                self._sms("7220", SCB_TXN_BODY),
+                self._sms("8079", MEZN_ATM_BODY),
+            ]
         )
 
-    def test_cli_version_matches_project_metadata(self):
-        """Test method to verify that --version and the packaging metadata
-        report the same version. They are declared in two different files
-        (@click.version_option in sms_txn_query_tool.py, and [project].version
-        in pyproject.toml) with nothing tying them together, so they drift
-        apart silently — and then a release identifies itself differently
-        depending on who is asking.
+    def run_cli(self, args):
+        return self.runner.invoke(cli, args, catch_exceptions=False)
+
+
+class TestCommandRegistration(CliTestCase):
+    def test_the_documented_underscore_names_are_the_real_names(self):
+        """Click >= 8.2 derives dashed names from the function name.
+
+        Without the explicit name string, `list_all_vendors` would silently
+        become `list-all-vendors` and every documented invocation would break.
         """
-        # --version is an eager option, so it prints and exits before the
-        # required filepath argument is parsed
-        result = CliRunner().invoke(cli, ["--version"])
-        self.assertEqual(result.exit_code, 0)
+        expected = {
+            "list_all_vendors": list_all_vendors,
+            "list_all_cc_txns": list_all_cc_txns,
+            "monthly_cc_spending_summary": monthly_cc_spending_summary,
+            "list_all_debit_txns": list_all_debit_txns,
+            "monthly_debit_spending_summary": monthly_debit_spending_summary,
+        }
 
-        reported = re.search(r"version\s+(\S+)", result.output)
-        self.assertIsNotNone(reported, f"unexpected --version output: {result.output!r}")
+        self.assertEqual(set(cli.commands), set(expected))
+        for name, command in expected.items():
+            with self.subTest(command=name):
+                self.assertIs(cli.commands[name], command)
 
-        pyprojectPath = Path(__file__).parent.parent / "pyproject.toml"
-        projectVersion = tomllib.loads(pyprojectPath.read_text(encoding="utf-8"))[
-            "project"
-        ]["version"]
-
-        self.assertEqual(reported.group(1), projectVersion)
-
-    def test_lockfile_version_matches_project_metadata(self):
-        """Test method to verify that uv.lock carries the same version as
-        pyproject.toml.
-
-        This tool follows semantic versioning, and the number is declared in
-        three places: the CLI, pyproject.toml and uv.lock. The test above pins
-        the first two; this one pins the third, which is the one that gets
-        forgotten — `uv lock` has to be re-run after a bump, and nothing about
-        editing pyproject.toml prompts for it.
-        """
-        pyprojectPath = Path(__file__).parent.parent / "pyproject.toml"
-        pyproject = tomllib.loads(pyprojectPath.read_text(encoding="utf-8"))
-        projectName = pyproject["project"]["name"]
-        projectVersion = pyproject["project"]["version"]
-
-        lockPath = Path(__file__).parent.parent / "uv.lock"
-        lockedPackages = tomllib.loads(lockPath.read_text(encoding="utf-8"))["package"]
-        lockedProject = next(
-            package for package in lockedPackages if package["name"] == projectName
-        )
-
-        self.assertEqual(
-            lockedProject["version"],
-            projectVersion,
-            "uv.lock is stale — re-run `uv lock` after bumping the version",
-        )
-
-    def _optionNames(self, commandName: str) -> set:
-        return {param.name for param in cli.commands[commandName].params}
-
-    def test_cc_commands_accept_bank_option(self):
-        """Test method to verify that --bank is offered by every CC command,
-        so that HBL/FBL/SCB txns can be looked at one bank at a time.
-        """
-        for commandName in (
-            "list_all_vendors",
-            "list_all_cc_txns",
-            "monthly_cc_spending_summary",
-        ):
-            with self.subTest(command=commandName):
-                self.assertIn("bank", self._optionNames(commandName))
-
-    def test_bank_option_choices(self):
-        """Test method to verify that --bank offers exactly the banks whose
-        CC txns are parsed, case-insensitively.
-        """
-        bankOption = next(
+    def test_the_bank_choices_come_from_the_registry(self):
+        option = next(
             param
-            for param in cli.commands["list_all_cc_txns"].params
+            for param in list_all_cc_txns.params
             if param.name == "bank"
         )
 
-        self.assertEqual(list(bankOption.type.choices), ["HBL", "FBL", "SCB"])
-        self.assertFalse(bankOption.type.case_sensitive)
+        self.assertEqual(tuple(option.type.choices), ("HBL", "FBL", "SCB"))
 
-    def test_debit_txns_command_accepts_txn_type_option(self):
-        """Test method to verify that list_all_debit_txns offers --txn-type,
-        and that its choices are the enum *values* (lowercase). click 8.4.2
-        rejects the documented lowercase input if the Choice is built from the
-        StrEnum class itself.
-        """
-        options = self._optionNames("list_all_debit_txns")
-        self.assertIn("txn_type", options)
-
-        txnTypeOption = next(
+    def test_the_txn_type_choices_come_from_the_enum(self):
+        option = next(
             param
-            for param in cli.commands["list_all_debit_txns"].params
+            for param in list_all_debit_txns.params
             if param.name == "txn_type"
         )
+
         self.assertEqual(
-            list(txnTypeOption.type.choices),
-            ["card_purchase", "atm_withdrawal", "account_debit", "funds_transfer"],
+            set(option.type.choices),
+            {"card_purchase", "atm_withdrawal", "account_debit", "funds_transfer"},
         )
 
 
-class TestFilterTxnsByBank(unittest.TestCase):
+class TestHelpCostsNothing(CliTestCase):
+    """M2: the group callback used to parse the file before help was resolved."""
 
-    def _createTxn(self, bank: str) -> CreditCardTxnDC:
-        return CreditCardTxnDC(
-            amountTuple=CurrencyAmountTuple("PKR", 100.00),
-            date=datetime(2024, 6, 15, tzinfo=DEFAULT_TZ),
-            vendor=f"{bank} VENDOR",
-            ccLastFourDigits=0,
-            bank=bank,
+    def test_subcommand_help_parses_nothing_and_reports_nothing(self):
+        backupPath = self._standardBackup()
+
+        result = self.run_cli([str(backupPath), "list_all_cc_txns", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("List every credit card transaction", result.stdout)
+        # nothing about the run: no header, no parse summary, no warnings
+        self.assertEqual(result.stderr, "")
+
+    def test_help_works_even_when_the_backup_could_not_be_parsed(self):
+        """Proof that the file is never opened: this one is not valid XML."""
+        backupPath = self._backup(raw="<smses count='1'><sms")
+
+        result = self.run_cli([str(backupPath), "list_all_cc_txns", "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+
+    def test_group_help_parses_nothing(self):
+        backupPath = self._backup(raw="<smses count='1'><sms")
+
+        result = self.run_cli([str(backupPath), "--help"])
+
+        self.assertEqual(result.exit_code, 0)
+
+
+class TestStreamContract(CliTestCase):
+    """Results on stdout; everything about the run on stderr."""
+
+    def test_the_data_is_on_stdout_and_the_furniture_is_on_stderr(self):
+        result = self.run_cli([str(self._standardBackup()), "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("IMTIAZ SUPER MARKET", result.stdout)
+        self.assertNotIn("sms_txn_query_tool", result.stdout)
+        self.assertNotIn("Messages parsed", result.stdout)
+        self.assertIn("Messages parsed", result.stderr)
+        self.assertIn("Transactions extracted", result.stderr)
+
+    def test_parse_diagnostics_go_to_stderr_not_into_the_data(self):
+        backupPath = self._backup(
+            [
+                self._sms("7220", SCB_TXN_BODY),
+                self._sms("7220", SCB_TRUNCATED_BODY),
+            ]
         )
 
-    def setUp(self):
-        self.txns = [
-            self._createTxn("HBL"),
-            self._createTxn("FBL"),
-            self._createTxn("SCB"),
-            self._createTxn("FBL"),
-        ]
+        result = self.run_cli([str(backupPath), "list_all_cc_txns"])
 
-    def test_no_bank_returns_everything(self):
-        """Test method to verify that an absent --bank leaves the txn list
-        untouched (rather than filtering everything out).
-        """
-        self.assertEqual(_filterTxnsByBank(self.txns, None), self.txns)
+        self.assertIn("WARNING", result.stderr)
+        self.assertNotIn("WARNING", result.stdout)
 
-    def test_filters_to_the_requested_bank(self):
-        """Test method to verify that --bank keeps only that bank's txns."""
-        filtered = _filterTxnsByBank(self.txns, "FBL")
-
-        self.assertEqual(len(filtered), 2)
-        self.assertEqual({txn.bank for txn in filtered}, {"FBL"})
-
-    def test_bank_matching_nothing(self):
-        """Test method to verify that a bank with no txns yields an empty list
-        rather than an error.
-        """
-        parsedTxns = [self._createTxn("HBL")]
-
-        self.assertEqual(_filterTxnsByBank(parsedTxns, "SCB"), [])
-
-
-class TestUpdateMonthlyTotals(unittest.TestCase):
-    """The monthly totals dict pre-seeds pkr/cad/usd only, but the bank parsers
-    accept any 3-letter currency code — so a first-seen currency must not raise
-    a KeyError on either the new-month or the existing-month path.
-    """
-
-    def _createTxn(self, currency: str, isoDate: str) -> CreditCardTxnDC:
-        return CreditCardTxnDC(
-            amountTuple=CurrencyAmountTuple(currency, 250.00),
-            date=datetime.strptime(isoDate, "%Y-%m-%d").replace(tzinfo=DEFAULT_TZ),
-            vendor="A EUROPEAN VENDOR",
-            ccLastFourDigits=0,
-            bank="FBL",
+    def test_quiet_suppresses_the_furniture_but_not_the_data(self):
+        result = self.run_cli(
+            ["--quiet", str(self._standardBackup()), "list_all_cc_txns"]
         )
 
-    def test_seeded_currencies_aggregate(self):
-        """Test method to verify the ordinary case: two PKR txns in the same
-        month add up.
-        """
-        totals = {}
-        _updateMonthlyTotals(self._createTxn("PKR", "2024-06-15"), totals)
-        _updateMonthlyTotals(self._createTxn("PKR", "2024-06-20"), totals)
-
-        self.assertEqual(totals["2024_06"]["pkr"], 500.00)
-
-    def test_unseeded_currency_in_existing_month(self):
-        """Test method to verify that a first-seen currency landing in an
-        already-created month is seeded instead of raising KeyError.
-        """
-        totals = {}
-        _updateMonthlyTotals(self._createTxn("PKR", "2024-06-15"), totals)
-        _updateMonthlyTotals(self._createTxn("EUR", "2024-06-16"), totals)
-
-        self.assertEqual(totals["2024_06"]["eur"], 250.00)
-        self.assertEqual(totals["2024_06"]["pkr"], 250.00)
-
-    def test_unseeded_currency_opening_a_new_month(self):
-        """Test method to verify that a first-seen currency that is also the
-        first txn of a new month is seeded — the new-month path needs the seed
-        just as much as the existing-month path.
-        """
-        totals = {}
-        _updateMonthlyTotals(self._createTxn("EUR", "2024-07-01"), totals)
-
-        self.assertEqual(totals["2024_07"]["eur"], 250.00)
-        # the pre-seeded currencies are still present and untouched
-        self.assertEqual(totals["2024_07"]["pkr"], 0.00)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("IMTIAZ SUPER MARKET", result.stdout)
+        self.assertNotIn("Messages parsed", result.stderr)
 
 
-# One msg per shape the commands have to render: two HBL CC txns in different
-# months, an FBL txn in a second currency, an SCB txn on a BIN-only card mask
-# (so its Card cell is the empty placeholder), a Meezan ATM withdrawal, and a
-# msg from a sender nothing parses.
-BACKUP_MSGS = [
-    (
-        "4250",
-        "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
-        "at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023.",
-    ),
-    (
-        "14250",
-        "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
-        "at AGHA SUPER MARKET for PKR-3,120.75 on 02/Feb/2024.",
-    ),
-    (
-        "8756",
-        "Dear JOHN DOE, your FBL Card  has been charged for USD 42.99 on "
-        "11-Jan-24 09:05:31 AM at AMAZON.COM            SEATTLE       US.",
-    ),
-    (
-        "7220",
-        "Dear Client, PKR 6,780.00 have been paid at METRO CASH CARRYKarachi PAK "
-        "on 15-01-24 using Credit Card no 5495. Avail Limit PKR51000.00. SCBPL",
-    ),
-    (
-        "8079",
-        "PKR 35,000.00 cash withdrawn from KHAYABAN-E-SEHAR KHI from A/C "
-        "xxxxxx5602 KHAYABAN-E-SEHAR KHI on 19-Sep-23 at 19:42 "
-        "Balance: PKR 13,776,380.62",
-    ),
-    ("JAZZ", "Enjoy 5GB internet for Rs.150. Dial *117*14#"),
-]
+class TestOutputFormats(CliTestCase):
+    def test_csv_is_pure_data_with_a_header(self):
+        result = self.run_cli(
+            ["--format", "csv", str(self._standardBackup()), "list_all_cc_txns"]
+        )
 
-
-class TestCliCommandOutput(unittest.TestCase):
-    """End-to-end runs of every subcommand over a small synthetic backup.
-
-    These assert on what the commands *render*, which nothing else covers: the
-    unit tests above reach the filter helpers directly, and the parser suites
-    stop at the txn objects. A themed table that raises a MissingStyle, or a
-    filter that matches nothing and prints a header with no rows under it, only
-    shows up here.
-
-    The runner pins COLUMNS so that assertions do not depend on the width of
-    whatever terminal the suite happens to run in — Rich would otherwise size
-    the tables to it and ellipsize the vendor names being asserted on.
-    """
-
-    def setUp(self):
-        self.tempDir = tempfile.TemporaryDirectory()
-        self.backupPath = Path(self.tempDir.name) / "sms-backup.xml"
-
-        root = ET.Element("smses")
-        root.set("count", str(len(BACKUP_MSGS)))
-        for address, body in BACKUP_MSGS:
-            sms = ET.SubElement(root, "sms")
-            sms.set("protocol", "0")
-            sms.set("address", address)
-            sms.set("date", "1695197836791")
-            sms.set("type", "1")
-            sms.set("body", body)
-            sms.set("readable_date", "Sep 20, 2023 1:17:16 PM")
-        ET.ElementTree(root).write(self.backupPath, encoding="utf-8")
-
-        self.runner = CliRunner(env={"COLUMNS": "200"})
-
-    def tearDown(self):
-        self.tempDir.cleanup()
-
-    def _run(self, *args):
-        result = self.runner.invoke(cli, [str(self.backupPath), *args])
+        rows = list(csv.DictReader(io.StringIO(result.stdout)))
+        self.assertEqual(len(rows), 3)
         self.assertEqual(
-            result.exit_code, 0, f"command failed: {result.output}{result.exception!r}"
+            set(rows[0]),
+            {"date", "bank", "card", "vendor", "currency", "amount"},
         )
 
-        return result.output
-
-    def test_parse_summary_is_rendered(self):
-        """Test method to verify that loading a backup reports both summary
-        tables, and that the msg counts land in the right buckets.
-        """
-        output = self._run("list_all_vendors")
-
-        self.assertIn("Messages parsed", output)
-        self.assertIn("Transactions extracted", output)
-        self.assertIn("Parsed 6 SMS messages", output)
-
-    def test_output_is_plain_text_when_not_a_terminal(self):
-        """Test method to verify that nothing emits ANSI escapes into a pipe.
-
-        Rich decides this from the stream, so a console accidentally built with
-        force_terminal (or a stray print of an already-rendered string) would
-        put escape codes into a redirected run.
-        """
-        output = self._run("list_all_cc_txns")
-
-        self.assertNotIn("\x1b[", output)
-
-    def test_list_all_cc_txns_renders_every_bank(self):
-        """Test method to verify that the CC listing shows all three banks'
-        txns, with the vendor, currency and grouped amount of each.
-        """
-        output = self._run("list_all_cc_txns")
-
-        self.assertIn("Credit card transactions", output)
-        self.assertIn("Found 4 CC transactions", output)
-        for vendor in ("IMTIAZ SUPER MARKET", "AMAZON.COM", "METRO CASH CARRY"):
-            self.assertIn(vendor, output)
-        # thousands-grouped to 2dp, and the second currency kept apart
-        self.assertIn("25,170.49", output)
-        self.assertIn("42.99", output)
-        # the caption breaks the total down by bank
-        self.assertIn("HBL 2", output)
-
-    def test_list_all_cc_txns_honours_the_bank_filter(self):
-        """Test method to verify that --bank narrows the rendered table, not
-        just the count in the header.
-        """
-        output = self._run("list_all_cc_txns", "--bank", "fbl")
-
-        self.assertIn("Found 1 CC transactions (bank FBL)", output)
-        self.assertIn("AMAZON.COM", output)
-        self.assertNotIn("IMTIAZ SUPER MARKET", output)
-
-    def test_list_all_vendors_renders_sorted_unique_vendors(self):
-        """Test method to verify that the vendor listing is deduplicated and
-        alphabetical.
-        """
-        output = self._run("list_all_vendors", "--bank", "HBL")
-
-        self.assertIn("Found 2 unique vendors (bank HBL)", output)
-        self.assertLess(
-            output.index("AGHA SUPER MARKET"), output.index("IMTIAZ SUPER MARKET")
+    def test_json_is_schema_versioned(self):
+        result = self.run_cli(
+            ["--format", "json", str(self._standardBackup()), "list_all_cc_txns"]
         )
 
-    def test_monthly_cc_summary_renders_months_and_totals(self):
-        """Test method to verify the monthly table: a row per month, a column
-        per currency actually spent, and a grand total footer.
-        """
-        output = self._run("monthly_cc_spending_summary")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["kind"], "cc_txns")
+        self.assertEqual(payload["count"], 3)
 
-        self.assertIn("2023-10", output)
-        self.assertIn("2024-01", output)
-        self.assertIn("PKR", output)
-        self.assertIn("USD", output)
-        # nothing was spent in CAD, so it gets no column at all
-        self.assertNotIn("CAD", output)
-        self.assertIn("TOTAL", output)
-        self.assertIn("35,071.24", output)
-
-    def test_monthly_cc_summary_verbose_also_lists_the_txns(self):
-        """Test method to verify that --verbose adds the txn listing the
-        summary was built from, which is otherwise not shown.
-        """
-        quiet = self._run("monthly_cc_spending_summary")
-        verbose = self._run("monthly_cc_spending_summary", "--verbose")
-
-        self.assertNotIn("IMTIAZ SUPER MARKET", quiet)
-        self.assertIn("IMTIAZ SUPER MARKET", verbose)
-        self.assertIn("TOTAL", verbose)
-
-    def test_list_all_debit_txns_renders_type_and_account(self):
-        """Test method to verify that the debit listing carries the txn type
-        and the account mask, which the CC listing has no equivalent of.
-        """
-        output = self._run("list_all_debit_txns", "--txn-type", "atm_withdrawal")
-
-        self.assertIn("Found 1 debit transactions (type atm_withdrawal)", output)
-        self.assertIn("atm_withdrawal", output)
-        self.assertIn("xxxxxx5602", output)
-        self.assertIn("35,000.00", output)
-
-    def test_monthly_debit_summary_renders_totals(self):
-        """Test method to verify that the debit summary renders its own monthly
-        table rather than reporting on CC txns.
-        """
-        output = self._run("monthly_debit_spending_summary")
-
-        self.assertIn("Summarizing 1 debit transactions", output)
-        self.assertIn("2023-09", output)
-        self.assertIn("35,000.00", output)
-
-    def test_a_filter_matching_nothing_says_so(self):
-        """Test method to verify that an empty result renders the explicit
-        'nothing matched' state.
-
-        A table header with no rows under it reads as a bug in the tool rather
-        than as an answer, and every command has to say the same thing.
-        """
-        commands = (
-            ("list_all_cc_txns", "No credit card transactions match this filter."),
-            ("list_all_vendors", "No vendors match this filter."),
-            (
-                "monthly_cc_spending_summary",
-                "No credit card transactions match this filter.",
-            ),
-            (
-                "list_all_debit_txns",
-                "No account debit transactions match this filter.",
-            ),
-            (
-                "monthly_debit_spending_summary",
-                "No account debit transactions match this filter.",
-            ),
+    def test_amounts_are_exact_strings_not_json_numbers(self):
+        """A JSON number is a float in almost every consumer."""
+        result = self.run_cli(
+            ["--format", "json", str(self._standardBackup()), "list_all_cc_txns"]
         )
 
-        for commandName, expected in commands:
-            with self.subTest(command=commandName):
-                output = self._run(commandName, "--from-date", "2030-01-01")
-                self.assertIn(expected, output)
+        amounts = {row["amount"] for row in json.loads(result.stdout)["rows"]}
+        for amount in amounts:
+            self.assertIsInstance(amount, str)
+        self.assertIn("25170.49", amounts)
 
-    def test_no_color_flag_is_accepted_before_the_filepath(self):
-        """Test method to verify that --no-color is a group option taking
-        effect for the whole run.
+    def test_all_three_formats_agree_on_the_amounts(self):
+        backupPath = self._standardBackup()
 
-        It has to be written before FILEPATH: a Click group stops parsing its
-        own options at the first positional argument, so the same flag after
-        the path is read as the FILEPATH value itself. Both orderings are
-        pinned here so that the documented invocation cannot quietly stop
-        working.
-        """
-        accepted = self.runner.invoke(
-            cli, ["--no-color", str(self.backupPath), "list_all_vendors"]
+        asJson = self.run_cli(
+            ["--format", "json", str(backupPath), "list_all_cc_txns"]
         )
-        self.assertEqual(accepted.exit_code, 0, accepted.output)
+        asCsv = self.run_cli(["--format", "csv", str(backupPath), "list_all_cc_txns"])
+        asTable = self.run_cli([str(backupPath), "list_all_cc_txns"])
 
-        rejected = self.runner.invoke(
-            cli, [str(self.backupPath), "--no-color", "list_all_vendors"]
+        jsonAmounts = sorted(
+            Decimal(row["amount"]) for row in json.loads(asJson.stdout)["rows"]
         )
-        self.assertEqual(rejected.exit_code, 2)
+        csvAmounts = sorted(
+            Decimal(row["amount"])
+            for row in csv.DictReader(io.StringIO(asCsv.stdout))
+        )
 
-    def test_a_directory_is_rejected_as_the_backup_path(self):
-        """Test method to verify that a directory is reported as a bad
-        FILEPATH argument instead of failing later inside the XML parse.
-        """
-        result = self.runner.invoke(cli, [self.tempDir.name, "list_all_vendors"])
+        self.assertEqual(jsonAmounts, csvAmounts)
+        self.assertIn("25,170.49", asTable.stdout)
+
+    def test_an_empty_machine_result_is_an_ordinary_answer(self):
+        """For a program, no rows is data -- not a panel saying so."""
+        result = self.run_cli(
+            [
+                "--format",
+                "csv",
+                str(self._standardBackup()),
+                "list_all_cc_txns",
+                "--from-date",
+                "2099-01-01",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout.strip(), "date,bank,card,vendor,currency,amount")
+
+    def test_a_formula_leading_vendor_is_defused_in_csv(self):
+        """A spreadsheet would otherwise treat this cell as a live formula."""
+        body = HBL_TXN_BODY.replace("IMTIAZ SUPER MARKET", "=cmd|calc")
+        backupPath = self._backup([self._sms("4250", body)])
+
+        result = self.run_cli(["--format", "csv", str(backupPath), "list_all_cc_txns"])
+
+        rows = list(csv.DictReader(io.StringIO(result.stdout)))
+        self.assertEqual(rows[0]["vendor"], "'=cmd|calc")
+
+
+class TestFiltersAndTotals(CliTestCase):
+    def test_the_bank_filter_is_case_insensitive(self):
+        result = self.run_cli(
+            ["--format", "csv", str(self._standardBackup()),
+             "list_all_cc_txns", "--bank", "fbl"]
+        )
+
+        rows = list(csv.DictReader(io.StringIO(result.stdout)))
+        self.assertEqual([row["bank"] for row in rows], ["FBL"])
+
+    def test_the_txn_type_filter(self):
+        result = self.run_cli(
+            ["--format", "csv", str(self._standardBackup()),
+             "list_all_debit_txns", "--txn-type", "atm_withdrawal"]
+        )
+
+        rows = list(csv.DictReader(io.StringIO(result.stdout)))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["txnType"], "atm_withdrawal")
+
+    def test_an_unknown_bank_is_a_usage_error(self):
+        result = self.runner.invoke(
+            cli, [str(self._standardBackup()), "list_all_cc_txns", "--bank", "XYZ"]
+        )
 
         self.assertEqual(result.exit_code, 2)
 
+    def test_monthly_totals_are_exact_and_split_by_currency(self):
+        backupPath = self._backup(
+            [
+                self._sms("4250", HBL_TXN_BODY),
+                self._sms("8756", FBL_TXN_BODY),
+            ]
+        )
+
+        result = self.run_cli(
+            ["--format", "json", str(backupPath), "monthly_cc_spending_summary"]
+        )
+
+        rows = {(row["month"], row["currency"]): row["total"]
+                for row in json.loads(result.stdout)["rows"]}
+        self.assertEqual(rows[("2023-10", "PKR")], "25170.49")
+        self.assertEqual(rows[("2023-09", "USD")], "39.99")
+
+    def test_a_hundred_small_txns_sum_exactly(self):
+        """The float failure this whole change exists to remove."""
+        elements = [
+            self._sms(
+                "4250",
+                HBL_TXN_BODY.replace("PKR-25,170.49", "PKR-0.01").replace(
+                    "IMTIAZ SUPER MARKET", f"SHOP {index:03d}"
+                ),
+            )
+            for index in range(100)
+        ]
+
+        result = self.run_cli(
+            ["--format", "json", str(self._backup(elements)),
+             "monthly_cc_spending_summary"]
+        )
+
+        rows = json.loads(result.stdout)["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(Decimal(rows[0]["total"]), Decimal("1.00"))
+        self.assertEqual(rows[0]["txns"], 100)
+
+    def test_vendors_are_listed_uniquely_and_sorted(self):
+        result = self.run_cli(
+            ["--format", "csv", str(self._standardBackup()), "list_all_vendors"]
+        )
+
+        vendors = [row["vendor"] for row in csv.DictReader(io.StringIO(result.stdout))]
+        self.assertEqual(vendors, sorted(vendors))
+        self.assertEqual(len(vendors), len(set(vendors)))
+
+
+class TestTableRendering(CliTestCase):
+    def test_a_filter_matching_nothing_says_so_in_words(self):
+        result = self.run_cli(
+            [str(self._standardBackup()), "list_all_cc_txns",
+             "--from-date", "2099-01-01"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("No credit card transactions match", result.stderr)
+
+    def test_verbose_adds_the_underlying_txns_to_a_summary(self):
+        backupPath = self._standardBackup()
+
+        plain = self.run_cli([str(backupPath), "monthly_cc_spending_summary"])
+        verbose = self.run_cli(
+            [str(backupPath), "monthly_cc_spending_summary", "--verbose"]
+        )
+
+        self.assertNotIn("IMTIAZ SUPER MARKET", plain.stdout)
+        self.assertIn("IMTIAZ SUPER MARKET", verbose.stdout)
+
+    def test_no_color_must_precede_the_filepath(self):
+        """A Click group stops parsing its own options at the first positional
+        argument, so the flag after the path is read as the path itself."""
+        backupPath = self._standardBackup()
+
+        good = self.run_cli(["--no-color", str(backupPath), "list_all_cc_txns"])
+        bad = self.runner.invoke(
+            cli, [str(backupPath), "--no-color", "list_all_cc_txns"]
+        )
+
+        self.assertEqual(good.exit_code, 0)
+        self.assertNotEqual(bad.exit_code, 0)
+
+    def test_the_vendor_listing_renders(self):
+        """The default format of a shipped command, which the CSV test above
+        does not reach.
+        """
+        result = self.run_cli([str(self._standardBackup()), "list_all_vendors"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("IMTIAZ SUPER MARKET", result.stdout)
+        self.assertIn("vendors", result.stdout)
+
+    def test_the_debit_listing_renders(self):
+        result = self.run_cli([str(self._standardBackup()), "list_all_debit_txns"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("MEEZAN ATM DHA PHASE 6", result.stdout)
+
+    def test_the_monthly_debit_summary_renders(self):
+        result = self.run_cli(
+            [str(self._standardBackup()), "monthly_debit_spending_summary"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("2024-06", result.stdout)
+
+
+class TestExitCodes(CliTestCase):
+    def test_a_directory_is_rejected_as_the_filepath(self):
+        tmpDir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpDir.cleanup)
+
+        result = self.runner.invoke(cli, [tmpDir.name, "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 2)
+
+    def test_a_malformed_backup_exits_one(self):
+        backupPath = self._backup(raw="<smses count='1'><sms")
+
+        result = self.runner.invoke(cli, [str(backupPath), "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 1)
+
+    def test_a_wrong_root_element_exits_one(self):
+        backupPath = self._backup(raw="<contacts count='0'></contacts>")
+
+        result = self.runner.invoke(cli, [str(backupPath), "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 1)
+
+    def test_strict_exits_three_when_something_was_skipped(self):
+        backupPath = self._backup(
+            [
+                self._sms("7220", SCB_TXN_BODY),
+                self._sms("7220", SCB_TRUNCATED_BODY),
+            ]
+        )
+
+        result = self.runner.invoke(
+            cli, ["--strict", str(backupPath), "list_all_cc_txns"]
+        )
+
+        self.assertEqual(result.exit_code, EXIT_STRICT_FAILURE)
+
+    def test_strict_is_silent_on_a_clean_backup(self):
+        result = self.runner.invoke(
+            cli, ["--strict", str(self._standardBackup()), "list_all_cc_txns"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+
+    def test_a_successful_run_exits_zero(self):
+        result = self.run_cli([str(self._standardBackup()), "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 0)
+
+
+class TestDuplicatePolicyOption(CliTestCase):
+    def test_none_keeps_both_copies_of_a_repeated_msg(self):
+        backupPath = self._backup(
+            [self._sms("4250", HBL_TXN_BODY), self._sms("4250", HBL_TXN_BODY)]
+        )
+
+        collapsed = self.run_cli(
+            ["--format", "csv", str(backupPath), "list_all_cc_txns"]
+        )
+        kept = self.run_cli(
+            ["--format", "csv", "--duplicates", "none",
+             str(backupPath), "list_all_cc_txns"]
+        )
+
+        self.assertEqual(len(list(csv.DictReader(io.StringIO(collapsed.stdout)))), 1)
+        self.assertEqual(len(list(csv.DictReader(io.StringIO(kept.stdout)))), 2)
+
+    def test_review_reports_the_suppressions_that_were_judgement_calls(self):
+        """`exact` collapses silently; `review` says how many were ambiguous."""
+        backupPath = self._backup(
+            [self._sms("4250", HBL_TXN_BODY), self._sms("4250", HBL_TXN_BODY)]
+        )
+
+        quietly = self.run_cli([str(backupPath), "list_all_cc_txns"])
+        reviewed = self.run_cli(
+            ["--duplicates", "review", str(backupPath), "list_all_cc_txns"]
+        )
+
+        self.assertNotIn("REVIEW", quietly.stderr)
+        self.assertIn("REVIEW", reviewed.stderr)
+        self.assertIn("1 of 1", reviewed.stderr)
+        # the data itself is unchanged -- only the reporting differs
+        self.assertEqual(quietly.stdout, reviewed.stdout)
+
+    def test_review_says_so_when_no_suppression_was_ambiguous(self):
+        """FBL timestamps its alerts, so an identical body provably repeats."""
+        backupPath = self._backup(
+            [self._sms("8756", FBL_TXN_BODY), self._sms("8756", FBL_TXN_BODY)]
+        )
+
+        result = self.run_cli(
+            ["--duplicates", "review", str(backupPath), "list_all_cc_txns"]
+        )
+
+        self.assertIn("provably repeats", result.stderr)
+
 
 if __name__ == "__main__":
-    # to run this script:
-    #   cd /path/to/src sub-directory
-    #   python -m unittest discover -s ..\tests\ -v
-    #
     unittest.main()

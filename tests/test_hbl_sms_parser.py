@@ -1,213 +1,169 @@
 import unittest
-import xml
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from parser.hbl_sms_parser import HBLSmsParser
+from decimal import Decimal
 
-from cc_txn import CurrencyAmountTuple
-from common import DEFAULT_TZ
+from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.domain.diagnostics import SkipReason
+from sms_msgs_scraper.domain.message import SmsRecord
+from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.parser.hbl_sms_parser import HBLSmsParser
+
+TXN_BODY = (
+    "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged "
+    "at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023."
+)
+
+OTP_BODY = (
+    "648975 is your One Time Password (OTP) for the internet transaction on "
+    "HBL Card ending with 0077. This OTP is valid for 10 mins. Do not share "
+    "OTP with anyone."
+)
 
 
-class TestHBLSmsParser(unittest.TestCase):
+def record(body: str, sender: str = "4250") -> SmsRecord:
+    return SmsRecord(
+        sender=sender, body=body, receivedAt="Oct 2, 2023 9:57:06 PM", index=0
+    )
 
-    def _createBaseSmsMsg(self) -> ET.Element:
-        sms = ET.Element("sms")
-        sms.set("protocol", "0")
-        sms.set("date", "1696265826791")
-        sms.set("type", "1")
-        sms.set("subject", "null")
-        sms.set("toa", "null")
-        sms.set("sc_toa", "null")
-        sms.set("read", "1")
-        sms.set("status", "-1")
-        sms.set("locked", "0")
-        sms.set("date_sent", "1696265824000")
-        sms.set("sub_id", "1")
-        sms.set("readable_date", "Oct 2, 2023 9:57:06 PM")
 
-        return sms
+class TestHBLTxnSignal(unittest.TestCase):
+    def test_a_charge_msg_carries_the_txn_signal(self):
+        self.assertTrue(HBLSmsParser.isTxnMsg(record(TXN_BODY)))
 
-    def _create_dummy_hbl_sms_msg(
-        self, body: str, shortCode: str = HBLSmsParser.HBL_SHORT_CODES[0]
-    ) -> ET.Element:
-        smsMsg = self._createBaseSmsMsg()
-        smsMsg.set("address", shortCode)
-        smsMsg.set("body", body)
-        smsMsg.set("service_center", "+92308984567")
-        smsMsg.set("contact_name", "(Unknown)")
+    def test_an_otp_msg_does_not(self):
+        self.assertFalse(HBLSmsParser.isTxnMsg(record(OTP_BODY)))
 
-        # tree = ET.ElementTree(smsMsg)
-        # tree.write("hbl_sms_msg.xml")
 
-        return smsMsg
+class TestHBLExtraction(unittest.TestCase):
+    def test_every_field_is_extracted(self):
+        """Including the trailing period stripped off the date before parsing."""
+        result = HBLSmsParser.extract(record(TXN_BODY))
 
-    def _create_dummy_non_hbl_sms_msg(self) -> ET.Element:
-        smsMsg = self._createBaseSmsMsg()
-        smsMsg.set("address", "7220")
-        smsMsg.set(
-            "body",
-            "Dear Client, PKR 15134.00 have been paid at SHELL (SUNSET BOULEVAR KARACHI PAK on 02-10-23 using Credit Card no 5452xxxxxxxx1280. Avail Limit PKR44429.45. SCBPL",
-        )
-        smsMsg.set("service_center", "+92308984321")
-        smsMsg.set("contact_name", "SCB shortcode")
+        self.assertTrue(result.succeeded)
+        txn = result.txn
+        self.assertEqual(txn.vendor, "IMTIAZ SUPER MARKET")
+        self.assertEqual(txn.card.lastFour, "8526")
+        self.assertEqual(txn.money, Money(Decimal("25170.49"), "PKR"))
+        self.assertEqual(txn.date, datetime(2023, 10, 1, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.bank, "HBL")
 
-        # tree = ET.ElementTree(smsMsg)
-        # tree.write("non-hbl_sms_msg.xml")
+    def test_a_non_txn_body_yields_a_diagnostic_not_a_partial_txn(self):
+        result = HBLSmsParser.extract(record(OTP_BODY))
 
-        return smsMsg
+        self.assertFalse(result.succeeded)
+        self.assertIsNone(result.txn)
+        self.assertEqual(result.diagnostic.reason, SkipReason.NO_TEMPLATE_MATCH)
 
-    def test_hbl_sms_msg(self):
-        """Test method to verify that an HBL sms msg is identified
-        as an HBL SMS msg by the HBLSmsParser.isSmsFromHBL() utility method.
+    def test_amount_formats_seen_in_the_corpus(self):
+        cases = [
+            ("PKR-25,170.49", Money(Decimal("25170.49"), "PKR")),
+            ("PKR-450.00", Money(Decimal("450.00"), "PKR")),
+            ("PKR-1,000", Money(Decimal("1000"), "PKR")),
+            ("USD-4.02", Money(Decimal("4.02"), "USD")),
+            ("CAD-1,234.56", Money(Decimal("1234.56"), "CAD")),
+        ]
+
+        for clause, expected in cases:
+            with self.subTest(txnAmount=clause):
+                body = TXN_BODY.replace("PKR-25,170.49", clause)
+
+                result = HBLSmsParser.extract(record(body))
+
+                self.assertTrue(result.succeeded)
+                self.assertEqual(result.txn.money, expected)
+
+    def test_ungrouped_thousands_now_parse(self):
+        """This test used to pin the bug rather than the behaviour.
+
+        `PKR-25170.49` -- an amount over 1,000 written without comma grouping --
+        failed the old amount pattern, which *required* the commas. The failure
+        produced a `(None, -1.2345)` sentinel, and the assertion that followed
+        aborted the entire run over one message. Under `python -O`, with the
+        assertion stripped, it instead produced a transaction whose amount was
+        negative, which would silently reduce a monthly total.
+
+        It is now an ordinary amount.
         """
-        body = "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023."
-        sms = self._create_dummy_hbl_sms_msg(body)
+        body = TXN_BODY.replace("PKR-25,170.49", "PKR-25170.49")
 
-        parser = HBLSmsParser()
+        result = HBLSmsParser.extract(record(body))
 
-        self.assertTrue(parser.isSmsFromHBL(sms))
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.txn.money, Money(Decimal("25170.49"), "PKR"))
 
-    def test_non_hbl_sms_msg(self):
-        """Test method to verify that a non-HBL sms msg is identified
-        as a non-HBL SMS msg by the HBLSmsParser.isSmsFromHBL() utility method.
-        """
-        sms = self._create_dummy_non_hbl_sms_msg()
+    def test_a_malformed_amount_is_skipped_rather_than_repaired(self):
+        for clause in ("PKR-1,2,3.00", "PKR-.00", "XYZ~100.00"):
+            with self.subTest(txnAmount=clause):
+                body = TXN_BODY.replace("PKR-25,170.49", clause)
 
-        parser = HBLSmsParser()
+                result = HBLSmsParser.extract(record(body))
 
-        self.assertFalse(parser.isSmsFromHBL(sms))
+                self.assertFalse(result.succeeded)
 
-    def test_all_hbl_short_codes_recognized(self):
-        """Test method to verify that every registered HBL short code is
-        identified as HBL. HBL migrated CC txn alerts from 4250 to 14250 in
-        mid-Jan 2025, so both codes must stay recognized — dropping either
-        one silently loses part of the txn history.
-        """
-        body = "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023."
+    def test_nothing_in_this_parser_raises_on_bad_input(self):
+        """The whole point of the de-assertion: no message aborts a run."""
+        bodies = [
+            TXN_BODY.replace("01/Oct/2023", "31/Feb/2023"),
+            TXN_BODY.replace("IMTIAZ SUPER MARKET", ""),
+            TXN_BODY.replace("PKR-25,170.49", "PKR-0.00"),
+            "",
+            "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged at",
+        ]
 
-        for shortCode in HBLSmsParser.HBL_SHORT_CODES:
-            with self.subTest(shortCode=shortCode):
-                sms = self._create_dummy_hbl_sms_msg(body, shortCode)
+        for body in bodies:
+            with self.subTest(body=body[:40]):
+                result = HBLSmsParser.extract(record(body))
 
-                self.assertTrue(HBLSmsParser.isSmsFromHBL(sms))
+                self.assertFalse(result.succeeded)
+                self.assertIsNotNone(result.diagnostic)
 
-    def test_hbl_sms_isMsgCreditCardTxn(self):
-        """Test method to verify that a valid HBL (CC Txn) sms msg is identified
-        as a CC Txn msg by the HBLSmsParser.isMsgCreditCardTxn() utility method.
-        """
-        body = "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged at A MOOSAJEE SONS for PKR-22,001.00 on 25/Sep/2023."
-        sms = self._create_dummy_hbl_sms_msg(body)
+    def test_a_diagnostic_never_carries_the_message_body(self):
+        """HBL used to print the complete body of every failure."""
+        body = TXN_BODY.replace("IMTIAZ SUPER MARKET", "A VERY PRIVATE VENDOR")
+        body = body.replace("on 01/Oct/2023", "on NOT-A-DATE")
 
-        parser = HBLSmsParser()
+        result = HBLSmsParser.extract(record(body))
 
-        self.assertTrue(parser.isMsgCreditCardTxn(sms))
+        self.assertFalse(result.succeeded)
+        self.assertNotIn("PRIVATE", result.diagnostic.message())
+        self.assertIn("4250", result.diagnostic.message())
 
-    def test_hbl_non_sms1_isMsgCreditCardTxn(self):
-        """Test method to verify that a valid HBL (non CC Txn) sms msg is identified
-        as a non-CC Txn msg by the HBLSmsParser.isMsgCreditCardTxn() utility method.
-        """
-        body = "648975 is your One Time Password (OTP) for the internet transaction on HBL Card ending with 0077. This OTP is valid for 10 mins. Do not share OTP with anyone."
-        sms = self._create_dummy_hbl_sms_msg(body)
 
-        parser = HBLSmsParser()
+class TestHBLDateHandling(unittest.TestCase):
+    def test_a_txn_date_is_stamped_with_karachi_tz(self):
+        """Stamped, not converted: the wall clock survives and +05:00 is added."""
+        txnDate = HBLSmsParser._convertToDateTime("01/Oct/2023")
 
-        self.assertFalse(parser.isMsgCreditCardTxn(sms))
+        self.assertEqual(txnDate, datetime(2023, 10, 1, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txnDate.utcoffset(), timedelta(hours=5))
+        self.assertEqual(txnDate.replace(tzinfo=None), datetime(2023, 10, 1))
 
-    def test_extractDetailsFromTxnMsg(self):
-        """Test method to verify that all txn fields are extracted from a
-        valid HBL CC txn msg — including the trailing period being stripped
-        off the txn date before it is parsed.
-        """
-        body = "Dear Customer, Your HBL CreditCard (ending with 8526) has been charged at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023."
-        sms = self._create_dummy_hbl_sms_msg(body)
-
-        ccTxn = HBLSmsParser.extractDetailsFromTxnMsg(sms)
-
-        self.assertIsNotNone(ccTxn)
-        self.assertEqual(ccTxn.vendor, "IMTIAZ SUPER MARKET")
-        self.assertEqual(ccTxn.ccLastFourDigits, 8526)
-        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("PKR", 25170.49))
-        self.assertEqual(ccTxn.date, datetime(2023, 10, 1, tzinfo=DEFAULT_TZ))
-
-    def test_extractDetailsFromTxnMsg_non_txn_msg(self):
-        """Test method to verify that a body not matching the CC txn format
-        yields None rather than a partially-populated txn.
-        """
-        body = "648975 is your One Time Password (OTP) for the internet transaction on HBL Card ending with 0077. This OTP is valid for 10 mins. Do not share OTP with anyone."
-        sms = self._create_dummy_hbl_sms_msg(body)
-
-        self.assertIsNone(HBLSmsParser.extractDetailsFromTxnMsg(sms))
-
-    def test_extractCurrencyAndAmount_formats(self):
-        """Test method to verify currency/amount parsing across the formats
-        seen in HBL CC txn msgs: comma-grouped thousands, sub-1,000 amounts,
-        amounts without decimals, and each supported currency.
-        """
-        for strValue, expected in [
-            ("PKR-25,170.49", CurrencyAmountTuple("PKR", 25170.49)),
-            ("PKR-450.00", CurrencyAmountTuple("PKR", 450.00)),
-            ("PKR-1,000", CurrencyAmountTuple("PKR", 1000.00)),
-            ("USD-4.02", CurrencyAmountTuple("USD", 4.02)),
-            ("CAD-1,234.56", CurrencyAmountTuple("CAD", 1234.56)),
-        ]:
-            with self.subTest(txnAmount=strValue):
-                self.assertEqual(
-                    HBLSmsParser._extractCurrencyAndAmount(strValue), expected
-                )
-
-    def test_extractCurrencyAndAmount_ungrouped_thousands(self):
-        """Test method pinning a known limitation: the amount regex requires
-        comma-grouped thousands, so an amount >= 1,000 written without commas
-        does not parse and yields the (None, -1.2345) failure sentinel. Via
-        extractDetailsFromTxnMsg() that sentinel then trips the currency
-        assert and aborts the whole parse run — if HBL ever drops the comma
-        grouping, HBL_CC_TXN_AMOUNT_RE is the regex to relax.
-        """
-        result = HBLSmsParser._extractCurrencyAndAmount("PKR-25170.49")
-
-        self.assertIsNone(result.currency)
-        self.assertEqual(result.amount, -1.2345)
-
-    def test_convertToDateTime_stamps_karachi_tz(self):
-        """Test method to verify that a txn date is stamped as Karachi local
-        time — the wall-clock date/time from the msg is preserved exactly and
-        the +05:00 offset is attached, with no shift applied.
-        """
-        datetimeObj = HBLSmsParser._convertToDateTime("01/Oct/2023")
-
-        self.assertEqual(datetimeObj, datetime(2023, 10, 1, tzinfo=DEFAULT_TZ))
-        self.assertEqual(datetimeObj.utcoffset(), timedelta(hours=5))
-        # the naive wall-clock must survive untouched: a converting (rather
-        # than stamping) implementation moves these
-        self.assertEqual(datetimeObj.replace(tzinfo=None), datetime(2023, 10, 1))
-
-    def test_convertToDateTime_preserves_calendar_date(self):
-        """Test method to verify that the calendar date is never shifted across
-        a day boundary, including at year-end where a shift is most visible.
-        """
-        for strValue, expected in [
+    def test_the_calendar_date_is_never_shifted(self):
+        cases = [
             ("01/Jan/2024", (2024, 1, 1)),
             ("31/Dec/2024", (2024, 12, 31)),
             ("29/Feb/2024", (2024, 2, 29)),
-        ]:
+        ]
+
+        for strValue, expected in cases:
             with self.subTest(txnDate=strValue):
-                datetimeObj = HBLSmsParser._convertToDateTime(strValue)
+                txnDate = HBLSmsParser._convertToDateTime(strValue)
 
                 self.assertEqual(
-                    (datetimeObj.year, datetimeObj.month, datetimeObj.day), expected
+                    (txnDate.year, txnDate.month, txnDate.day), expected
                 )
-                self.assertEqual((datetimeObj.hour, datetimeObj.minute), (0, 0))
+                self.assertEqual((txnDate.hour, txnDate.minute), (0, 0))
 
-    def test_convertToDateTime_malformed_date(self):
-        """Test method to verify that an unparseable txn date yields None
-        rather than raising.
-        """
+    def test_a_malformed_date_yields_none_rather_than_raising(self):
         self.assertIsNone(HBLSmsParser._convertToDateTime("2023-10-01"))
+
+    def test_an_impossible_date_is_reported_as_a_bad_date(self):
+        body = TXN_BODY.replace("01/Oct/2023", "31/Feb/2023")
+
+        result = HBLSmsParser.extract(record(body))
+
+        self.assertEqual(result.diagnostic.reason, SkipReason.BAD_DATE)
 
 
 if __name__ == "__main__":
-    # to run this script:
-    #   cd /path/to/src sub-directory
-    #   python -m unittest discover -s ..\tests\ -v
-    #
     unittest.main()

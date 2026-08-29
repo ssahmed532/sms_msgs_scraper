@@ -1,16 +1,18 @@
-import io
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
-from contextlib import redirect_stdout
 from datetime import datetime, timedelta
-from parser.hbl_sms_parser import HBLSmsParser
-from parser.scb_sms_parser import SCBSmsParser
+from decimal import Decimal
 from pathlib import Path
 
-from cc_txn import CurrencyAmountTuple
-from common import DEFAULT_TZ
-from sms_backup_file_parser import SmsBackupFileParser
+from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.domain.diagnostics import SkipReason
+from sms_msgs_scraper.domain.message import SmsRecord
+from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.registry import REGISTRY
+from sms_msgs_scraper.domain.types import CardReference
+from sms_msgs_scraper.parser.scb_sms_parser import SCBSmsParser
+from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
 
 # A well-formed SCB CC txn msg, matching the validated real format:
 #   Dear Client, PKR {amt} have been paid at {vendor}{city} {CTY} on {DD-MM-YY}
@@ -31,96 +33,61 @@ SCB_NO_AMOUNT_MSG = (
     "on 14-06-24 using Credit Card no 5495. Avail Limit PKR181962.55. SCBPL"
 )
 
+SCB_SENDER = "7220"
+# The second short code. It carries the identical template, and its messages
+# were silently routed to OTHER for the whole life of the tool before it was
+# declared in the registry.
+SCB_SECOND_SENDER = "9220"
 
-class TestSCBSmsParser(unittest.TestCase):
 
-    def _createSms(self, address: str, body: str) -> ET.Element:
-        sms = ET.Element("sms")
-        sms.set("protocol", "0")
-        sms.set("address", address)
-        sms.set("date", "1696265826791")
-        sms.set("type", "1")
-        sms.set("subject", "null")
-        sms.set("read", "1")
-        sms.set("status", "-1")
-        sms.set("body", body)
-        sms.set("service_center", "+92308984321")
-        sms.set("readable_date", "Oct 2, 2023 9:57:06 PM")
+def txnBody(
+    vendor: str = "PSO SERVICE STATION 7Karachi PAK",
+    amount: str = "12,450.90",
+    txnDate: str = "29-09-23",
+    cardMask: str = "5452xxxxxxxx1280",
+) -> str:
+    return SCB_TXN_MSG_TEMPLATE.format(
+        amount=amount, vendor=vendor, txnDate=txnDate, cardMask=cardMask
+    )
 
-        return sms
 
-    def _createScbSms(self, body: str) -> ET.Element:
-        return self._createSms(SCBSmsParser.SCB_SHORT_CODES[0], body)
+def record(body: str, sender: str = SCB_SENDER) -> SmsRecord:
+    return SmsRecord(
+        sender=sender, body=body, receivedAt="Sep 29, 2023 6:12:00 PM", index=0
+    )
 
-    def _createScbTxnSms(
-        self,
-        vendor: str = "PSO SERVICE STATION 7Karachi PAK",
-        amount: str = "12,450.90",
-        txnDate: str = "29-09-23",
-        cardMask: str = "5452xxxxxxxx1280",
-    ) -> ET.Element:
-        return self._createScbSms(
-            SCB_TXN_MSG_TEMPLATE.format(
-                amount=amount, vendor=vendor, txnDate=txnDate, cardMask=cardMask
-            )
-        )
 
-    def _parseBackup(self, msgElements: list) -> SmsBackupFileParser:
-        """Write the given msg elements out as a backup XML file and run the
-        parser over it end-to-end (loadFromSmsBackupFile + parseMessages).
-        """
-        root = ET.Element("smses")
-        root.set("count", str(len(msgElements)))
-        root.extend(msgElements)
+class TestSCBSenders(unittest.TestCase):
+    """H1: SCB sends from two short codes, and only one was ever declared."""
 
-        tmpDir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpDir.cleanup)
-        backupFilepath = Path(tmpDir.name) / "sms_backup.xml"
-        ET.ElementTree(root).write(backupFilepath, encoding="utf-8")
+    def test_both_scb_short_codes_route_to_scb(self):
+        for sender in (SCB_SENDER, SCB_SECOND_SENDER):
+            with self.subTest(sender=sender):
+                spec = REGISTRY.specFor(sender)
 
-        parser = SmsBackupFileParser()
-        parser.loadFromSmsBackupFile(backupFilepath)
-        parser.parseMessages()
+                self.assertIsNotNone(
+                    spec, f"sender {sender} is not registered to any bank"
+                )
+                self.assertEqual(spec.id, "SCB")
 
-        return parser
+    def test_a_msg_from_the_second_sender_parses_identically(self):
+        """The template is the same; only the sender differed."""
+        fromFirst = SCBSmsParser.extract(record(txnBody(), SCB_SENDER))
+        fromSecond = SCBSmsParser.extract(record(txnBody(), SCB_SECOND_SENDER))
 
-    # ---------------------------------------------------------------- identification
+        self.assertTrue(fromFirst.succeeded)
+        self.assertTrue(fromSecond.succeeded)
+        self.assertEqual(fromFirst.txn.money, fromSecond.txn.money)
+        self.assertEqual(fromFirst.txn.vendor, fromSecond.txn.vendor)
+        self.assertEqual(fromFirst.txn.date, fromSecond.txn.date)
 
-    def test_scb_sms_msg(self):
-        """Test method to verify that a msg from an SCB short code is
-        identified as an SCB msg.
-        """
-        for shortCode in SCBSmsParser.SCB_SHORT_CODES:
-            with self.subTest(shortCode=shortCode):
-                sms = self._createSms(shortCode, "any body")
 
-                self.assertTrue(SCBSmsParser.isSmsFromSCB(sms))
+class TestSCBTxnSignal(unittest.TestCase):
+    def test_a_txn_msg_carries_the_signal(self):
+        self.assertTrue(SCBSmsParser.isTxnMsg(record(txnBody())))
 
-    def test_non_scb_sms_msg(self):
-        """Test method to verify that a msg from another bank's short code
-        (HBL here) is not identified as an SCB msg.
-        """
-        sms = self._createSms(
-            HBLSmsParser.HBL_SHORT_CODES[0],
-            "Dear Customer, Your HBL CreditCard (ending with 8526) has been "
-            "charged at IMTIAZ SUPER MARKET for PKR-25,170.49 on 01/Oct/2023.",
-        )
-
-        self.assertFalse(SCBSmsParser.isSmsFromSCB(sms))
-
-    def test_isMsgCreditCardTxn_txn_msg(self):
-        """Test method to verify that a well-formed CC txn msg is recognized
-        as a CC txn msg.
-        """
-        self.assertTrue(SCBSmsParser.isMsgCreditCardTxn(self._createScbTxnSms()))
-
-    def test_isMsgCreditCardTxn_rejects_non_txn_msgs(self):
-        """Test method to verify that the real non-txn templates SCB sends on
-        this same short code are not mistaken for CC txns. Both open with the
-        same 'Dear Client'/'Dear Customer' salutation as a txn msg, and the
-        account-transaction one even carries a PKR amount, so the txn check
-        has to key on the 'have been paid at' phrase to tell them apart.
-        """
+    def test_the_real_non_txn_templates_do_not(self):
+        """Both open with the same salutation, and one even carries an amount."""
         nonTxnBodies = [
             "Dear Client, a transaction of PKR 15000.00 has been completed on "
             "Account No. 01-21***71-01 on 05-08-24 using Online Banking.  "
@@ -132,288 +99,248 @@ class TestSCBSmsParser(unittest.TestCase):
 
         for body in nonTxnBodies:
             with self.subTest(body=body[:40]):
-                self.assertFalse(
-                    SCBSmsParser.isMsgCreditCardTxn(self._createScbSms(body))
-                )
+                self.assertFalse(SCBSmsParser.isTxnMsg(record(body)))
 
-    def test_isMsgCreditCardTxn_accepts_unusable_txn_msgs(self):
-        """Test method to verify that the two unusable-but-real txn shapes
-        still register as txn *attempts*. This is load-bearing for the skip
-        accounting: they have to pass this check and then fail extraction so
-        the orchestrator counts them as SCB_SKIPPED. Tightening the check
-        (e.g. also requiring 'using Credit Card no') would silently drop the
-        truncated msgs out of that count.
+    def test_the_unusable_but_real_txn_shapes_still_register_as_attempts(self):
+        """Load-bearing for the skip accounting.
+
+        These must pass the signal and then fail extraction, so they are counted
+        as skipped. Tightening the signal -- by also requiring "using Credit Card
+        no" -- would drop the truncated messages out of the count entirely
+        instead of reporting them.
         """
-        for body in [SCB_TRUNCATED_MSG, SCB_NO_AMOUNT_MSG]:
+        for body in (SCB_TRUNCATED_MSG, SCB_NO_AMOUNT_MSG):
             with self.subTest(body=body[:40]):
-                self.assertTrue(
-                    SCBSmsParser.isMsgCreditCardTxn(self._createScbSms(body))
-                )
+                self.assertTrue(SCBSmsParser.isTxnMsg(record(body)))
 
-    # ------------------------------------------------------------------- extraction
 
-    def test_extractDetailsFromTxnMsg_comma_grouped_amount(self):
-        """Test method to verify that every txn field is extracted off a msg
-        carrying a comma-grouped amount.
+class TestSCBExtraction(unittest.TestCase):
+    def _txn(self, body):
+        result = SCBSmsParser.extract(record(body))
+        self.assertTrue(result.succeeded, result.diagnostic)
+
+        return result.txn
+
+    def test_a_comma_grouped_amount(self):
+        txn = self._txn(txnBody(amount="12,450.90"))
+
+        self.assertEqual(txn.money, Money(Decimal("12450.90"), "PKR"))
+
+    def test_a_plain_amount(self):
+        txn = self._txn(txnBody(amount="15134.00"))
+
+        self.assertEqual(txn.money, Money(Decimal("15134.00"), "PKR"))
+
+    def test_malformed_grouping_is_rejected_not_repaired(self):
+        """"1,2,3.00" used to have its commas stripped and be read as 123.00."""
+        result = SCBSmsParser.extract(record(txnBody(amount="1,2,3.00")))
+
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.diagnostic.reason, SkipReason.NO_TEMPLATE_MATCH)
+
+    def test_the_digit_length_is_bounded(self):
+        """No input can push the amount toward floating-point infinity."""
+        result = SCBSmsParser.extract(record(txnBody(amount="9" * 40 + ".00")))
+
+        self.assertFalse(result.succeeded)
+
+    def test_a_full_card_mask_yields_the_last_four(self):
+        txn = self._txn(txnBody(cardMask="5452xxxxxxxx1280"))
+
+        self.assertEqual(txn.card, CardReference.of("1280"))
+        self.assertTrue(txn.card.known)
+
+    def test_a_bin_only_mask_carries_no_card_digits(self):
+        """Absent, not a card ending 0000 -- a distinction the old int could
+        not make."""
+        txn = self._txn(txnBody(cardMask="5495"))
+
+        self.assertFalse(txn.card.known)
+        self.assertEqual(txn.card, CardReference.absent())
+
+    def test_a_longer_bin_still_yields_the_real_last_four(self):
+        """A 6-digit BIN is the industry-standard next step.
+
+        Hard-coding the 4-digit BIN would have recorded these as having no card
+        digits while the digits sat in the message.
         """
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(self._createScbTxnSms())
-
-        self.assertIsNotNone(ccTxn)
-        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("PKR", 12450.90))
-        self.assertEqual(ccTxn.vendor, "PSO SERVICE STATION 7Karachi PAK")
-        self.assertEqual(ccTxn.ccLastFourDigits, 1280)
-        self.assertEqual(ccTxn.date, datetime(2023, 9, 29, tzinfo=DEFAULT_TZ))
-        self.assertEqual(ccTxn.bank, "SCB")
-
-    def test_extractDetailsFromTxnMsg_plain_amount(self):
-        """Test method to verify that an amount written without thousands
-        separators parses too — SCB uses both forms (141 of the 379 validated
-        txn msgs carry no comma).
-        """
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-            self._createScbTxnSms(amount="15134.00")
-        )
-
-        self.assertIsNotNone(ccTxn)
-        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("PKR", 15134.00))
-
-    def test_extractDetailsFromTxnMsg_currency_token_is_parsed(self):
-        """Test method to verify that the currency comes from the msg rather
-        than being hardcoded. Every SCB txn msg in the validated corpus is
-        PKR, but the token is captured, so a future non-PKR msg carries its
-        own currency instead of being mislabelled.
-        """
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-            self._createScbSms(
-                "Dear Client, USD 42.75 have been paid at AMAZON.CA CAN on "
-                "12-03-24 using Credit Card no 5452xxxxxxxx1280. Avail Limit "
-                "PKR59563.45. SCBPL"
-            )
-        )
-
-        self.assertIsNotNone(ccTxn)
-        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("USD", 42.75))
-
-    def test_extractDetailsFromTxnMsg_full_card_mask(self):
-        """Test method to verify that the last 4 card digits are pulled out of
-        the full card mask form.
-        """
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-            self._createScbTxnSms(cardMask="5452xxxxxxxx1280")
-        )
-
-        self.assertEqual(ccTxn.ccLastFourDigits, 1280)
-
-    def test_extractDetailsFromTxnMsg_bin_only_card_mask(self):
-        """Test method to verify that a BIN-only card mask — which carries no
-        last-4 digits at all — yields 0 rather than a wrong (or negative)
-        value. 83 of the 378 runtime SCB txns come in this shape.
-        """
-        for cardMask in ["5495", "5974"]:
+        for cardMask in ("545221xxxxxx1280", "5452xxxxxxxx1280"):
             with self.subTest(cardMask=cardMask):
-                ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-                    self._createScbTxnSms(cardMask=cardMask)
-                )
+                txn = self._txn(txnBody(cardMask=cardMask))
 
-                self.assertIsNotNone(ccTxn)
-                self.assertEqual(ccTxn.ccLastFourDigits, 0)
+                self.assertEqual(txn.card, CardReference.of("1280"))
 
-    def test_extractDetailsFromTxnMsg_longer_bin_card_mask(self):
-        """Test method to verify that the last 4 digits are recovered from a
-        mask whose BIN is not 4 digits long.
+    def test_an_unrecognized_mask_keeps_the_txn_and_reports_the_mask(self):
+        """The spending is real; only the card field is unusable.
 
-        The txn regex accepts any run of digits and x's, so this shape is
-        accepted as a txn. It used to be recorded with card 0 while the digits
-        sat right there in the msg — and indistinguishably from the legitimate
-        BIN-only shape. A 6-digit BIN is the industry-standard next step, so
-        this is the shape most likely to actually turn up.
+        Discarding the transaction would lose money data over a cosmetic field,
+        but silently recording no card is exactly what a change in the bank's
+        masking would look like -- so it is reported either way.
         """
-        for cardMask, expected in [
-            ("545221xxxxxx1280", 1280),
-            ("54522123xxxx4321", 4321),
-            ("xxxxxxxxxxxx9999", 9999),
-        ]:
-            with self.subTest(cardMask=cardMask):
-                ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-                    self._createScbTxnSms(cardMask=cardMask)
-                )
+        result = SCBSmsParser.extract(record(txnBody(cardMask="5452xxxx12")))
 
-                self.assertIsNotNone(ccTxn)
-                self.assertEqual(ccTxn.ccLastFourDigits, expected)
+        self.assertTrue(result.succeeded)
+        self.assertFalse(result.txn.card.known)
+        self.assertEqual(result.txn.money, Money(Decimal("12450.90"), "PKR"))
+        self.assertIsNotNone(result.diagnostic)
+        self.assertEqual(
+            result.diagnostic.reason, SkipReason.UNRECOGNIZED_CARD_MASK
+        )
 
-    def test_extractCardLastFourDigits_warns_on_unknown_mask_shape(self):
-        """Test method to verify that a mask shape which is neither form is
-        warned about rather than silently reported as 0.
-
-        Returning a bare 0 is indistinguishable from a legitimate BIN-only mask,
-        so without the warning a masking change at the bank would quietly strip
-        the card digits off every SCB txn.
-        """
-        with redirect_stdout(io.StringIO()) as captured:
-            # a masked section not followed by exactly 4 trailing digits
-            self.assertEqual(SCBSmsParser._extractCardLastFourDigits("5452xxxx12"), 0)
-        self.assertIn("WARNING", captured.getvalue())
-
-        # ...while both real shapes stay silent
+    def test_both_known_mask_shapes_report_nothing(self):
         for cardMask in ("5452xxxxxxxx1280", "5495"):
             with self.subTest(cardMask=cardMask):
-                with redirect_stdout(io.StringIO()) as captured:
-                    SCBSmsParser._extractCardLastFourDigits(cardMask)
-                self.assertEqual(captured.getvalue(), "")
+                result = SCBSmsParser.extract(record(txnBody(cardMask=cardMask)))
 
-    def test_extractDetailsFromTxnMsg_stamps_karachi_tz(self):
-        """Test method to verify that the txn date is *stamped* as Karachi
-        local time: DD-MM-YY is read day-first (the middle token is the
-        month), the wall-clock date survives untouched, and the +05:00 offset
-        is attached with no shift applied. A converting implementation
-        (astimezone) would move the date on any host not set to +05:00.
-        """
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-            self._createScbTxnSms(txnDate="29-09-23")
-        )
+                self.assertTrue(result.succeeded)
+                self.assertIsNone(result.diagnostic)
 
-        self.assertEqual(ccTxn.date, datetime(2023, 9, 29, tzinfo=DEFAULT_TZ))
-        self.assertEqual(ccTxn.date.tzinfo, DEFAULT_TZ)
-        self.assertEqual(ccTxn.date.utcoffset(), timedelta(hours=5))
-        self.assertEqual(ccTxn.date.replace(tzinfo=None), datetime(2023, 9, 29))
+    def test_the_txn_date_is_stamped_with_karachi_tz(self):
+        """DD-MM-YY read day-first; wall clock survives; +05:00 attached."""
+        txn = self._txn(txnBody(txnDate="29-09-23"))
 
-    def test_extractDetailsFromTxnMsg_vendor_kept_verbatim(self):
-        """Test method to verify that the vendor text is kept exactly as
-        captured, city included. SCB sometimes glues the city onto the
-        merchant name with no separating space, so there is no reliable
-        vendor/city split — a known limitation this pins deliberately.
-        """
-        for vendor in [
+        self.assertEqual(txn.date, datetime(2023, 9, 29, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.date.utcoffset(), timedelta(hours=5))
+        self.assertEqual(txn.date.replace(tzinfo=None), datetime(2023, 9, 29))
+
+    def test_the_vendor_is_kept_verbatim_city_included(self):
+        """SCB glues the city on with no separator, so no split is attempted."""
+        vendors = [
             "SOUTH CITY HOSPITALKarachi PAK",
             "Amazon.caAMAZON.CA CAN",
             "SHELL (SUNSET BOULEVAR KARACHI PAK",
-            # a vendor containing the " on " that separates the vendor from
-            # the txn date: the whole vendor must survive, not just the text
-            # ahead of the first " on "
+            # a vendor containing the " on " that separates vendor from date
             "CAFE on THE GO Karachi PAK",
-        ]:
+        ]
+
+        for vendor in vendors:
             with self.subTest(vendor=vendor):
-                ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-                    self._createScbTxnSms(vendor=vendor)
-                )
+                self.assertEqual(self._txn(txnBody(vendor=vendor)).vendor, vendor)
 
-                self.assertEqual(ccTxn.vendor, vendor)
+    def test_a_concatenated_body_yields_the_first_txn(self):
+        """The vendor capture is deliberately lazy.
 
-    def test_extractDetailsFromTxnMsg_takes_the_first_txn_in_the_body(self):
-        """Test method to verify that a body carrying two concatenated txn
-        alerts yields the *first* txn, i.e. the one the leading amount
-        belongs to.
-
-        The vendor capture is deliberately lazy. On every well-formed body in
-        the validated corpus a greedy capture behaves identically (there is
-        only one date/card tail to anchor on), so this concatenated shape —
-        which the SMS pipeline can produce, as the 21 truncated bodies show
-        it already mangles these msgs — is what pins the choice: a greedy
-        capture would pair the first amount with the *second* msg's vendor,
-        date and card, inventing a txn that never happened.
+        A greedy capture would pair the first amount with the *second* message's
+        vendor, date and card -- inventing a transaction that never happened.
+        The SMS pipeline demonstrably mangles these messages, as the truncated
+        bodies show.
         """
-        firstTxn = SCB_TXN_MSG_TEMPLATE.format(
-            amount="100.00",
-            vendor="FIRST SHOP Karachi PAK",
-            txnDate="01-02-24",
-            cardMask="5452xxxxxxxx1280",
+        firstTxn = txnBody(
+            amount="100.00", vendor="FIRST SHOP Karachi PAK", txnDate="01-02-24"
         )
-        secondTxn = SCB_TXN_MSG_TEMPLATE.format(
+        secondTxn = txnBody(
             amount="200.00",
             vendor="SECOND SHOP Lahore PAK",
             txnDate="03-04-24",
             cardMask="5452xxxxxxxx9999",
         )
 
-        ccTxn = SCBSmsParser.extractDetailsFromTxnMsg(
-            self._createScbSms(firstTxn + " " + secondTxn)
+        txn = self._txn(firstTxn + " " + secondTxn)
+
+        self.assertEqual(txn.money, Money(Decimal("100.00"), "PKR"))
+        self.assertEqual(txn.vendor, "FIRST SHOP Karachi PAK")
+        self.assertEqual(txn.date, datetime(2024, 2, 1, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.card, CardReference.of("1280"))
+
+
+class TestSCBSkipPaths(unittest.TestCase):
+    def test_a_truncated_body_is_skipped(self):
+        result = SCBSmsParser.extract(record(SCB_TRUNCATED_MSG))
+
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.diagnostic.reason, SkipReason.NO_TEMPLATE_MATCH)
+
+    def test_a_body_carrying_no_amount_is_skipped(self):
+        result = SCBSmsParser.extract(record(SCB_NO_AMOUNT_MSG))
+
+        self.assertFalse(result.succeeded)
+
+    def test_a_malformed_date_yields_none_rather_than_raising(self):
+        self.assertIsNone(SCBSmsParser._convertToDateTime("2023-10-01"))
+
+    def test_a_diagnostic_never_carries_the_message_body(self):
+        """A real run skips 26 of these; that is 26 real messages not dumped."""
+        result = SCBSmsParser.extract(
+            record("Dear Client, PKR 281.00 have been paid at A PRIVATE VENDOR ")
         )
 
-        self.assertIsNotNone(ccTxn)
-        self.assertEqual(ccTxn.amountTuple, CurrencyAmountTuple("PKR", 100.00))
-        self.assertEqual(ccTxn.vendor, "FIRST SHOP Karachi PAK")
-        self.assertEqual(ccTxn.date, datetime(2024, 2, 1, tzinfo=DEFAULT_TZ))
-        self.assertEqual(ccTxn.ccLastFourDigits, 1280)
+        line = result.diagnostic.message()
+        self.assertNotIn("PRIVATE", line)
+        self.assertIn("7220", line)
 
-    # ------------------------------------------------------------------ skip paths
 
-    def test_extractDetailsFromTxnMsg_truncated_body(self):
-        """Test method to verify that a body truncated mid-vendor (the date
-        and card never arrive) yields None rather than a partial txn. 21 real
-        msgs come in this shape.
-        """
-        self.assertIsNone(
-            SCBSmsParser.extractDetailsFromTxnMsg(
-                self._createScbSms(SCB_TRUNCATED_MSG)
-            )
-        )
+class TestSCBEndToEnd(unittest.TestCase):
+    def _sms(self, body: str, sender: str = SCB_SENDER) -> ET.Element:
+        sms = ET.Element("sms")
+        sms.set("address", sender)
+        sms.set("body", body)
+        sms.set("readable_date", "Sep 29, 2023 6:12:00 PM")
 
-    def test_extractDetailsFromTxnMsg_no_amount_body(self):
-        """Test method to verify that a body carrying a literal 'PKR .00'
-        amount yields None. These are foreign-currency txns whose real amount
-        is absent from the msg; extracting them would record a 0.00 txn. 5
-        real msgs come in this shape, and the amount regex rejects them by
-        requiring at least one digit before the decimal point.
-        """
-        self.assertIsNone(
-            SCBSmsParser.extractDetailsFromTxnMsg(
-                self._createScbSms(SCB_NO_AMOUNT_MSG)
-            )
-        )
+        return sms
 
-    def test_convertToDateTime_malformed_date(self):
-        """Test method to verify that an unparseable txn date yields None
-        rather than raising.
-        """
-        self.assertIsNone(SCBSmsParser._convertToDateTime("2023-09-29"))
+    def _parseBackup(self, msgElements: list):
+        root = ET.Element("smses")
+        root.set("count", str(len(msgElements)))
+        root.extend(msgElements)
 
-    # ----------------------------------------------------------------- end-to-end
+        tmpDir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpDir.cleanup)
+        backupFilepath = Path(tmpDir.name) / "sms_backup.xml"
+        ET.ElementTree(root).write(backupFilepath, encoding="utf-8")
 
-    def test_scb_txn_parsed_and_unusable_msg_skipped(self):
-        """Test method to verify the whole SCB path through the orchestrator:
-        a good txn msg becomes a CC txn tagged SCB, both msgs count as SCB
-        msgs, and the unusable one is counted as skipped instead of aborting
-        the run (an assert on the new branch would) or silently vanishing.
-        """
-        parser = self._parseBackup(
+        return SmsBackupFileParser().parse(backupFilepath)
+
+    def test_a_txn_parses_and_an_unusable_msg_is_counted_as_skipped(self):
+        report = self._parseBackup(
             [
-                self._createScbTxnSms(),
-                self._createScbSms(SCB_TRUNCATED_MSG),
+                self._sms(txnBody()),
+                self._sms(SCB_TRUNCATED_MSG),
+                self._sms(SCB_NO_AMOUNT_MSG),
             ]
         )
 
-        self.assertEqual(len(parser.ccTxns), 1)
-        self.assertEqual(parser.ccTxns[0].bank, "SCB")
-        self.assertEqual(parser.ccTxns[0].vendor, "PSO SERVICE STATION 7Karachi PAK")
-        self.assertEqual(parser.ccVendors, {"PSO SERVICE STATION 7Karachi PAK"})
-        self.assertEqual(parser.msgCounts["SCB"], 2)
-        self.assertEqual(parser.msgCounts["SCB_SKIPPED"], 1)
-        self.assertEqual(parser.msgCounts["OTHER"], 0)
-        self.assertEqual(parser.msgCounts["ALL"], 2)
+        self.assertEqual(len(report.ccTxns), 1)
+        self.assertEqual(report.ccTxns[0].bank, "SCB")
+        self.assertEqual(report.count("SCB"), 3)
+        self.assertEqual(report.count("SCB_SKIPPED"), 2)
+        self.assertEqual(report.count("OTHER"), 0)
 
-    def test_scb_non_txn_msg_counted_only(self):
-        """Test method to verify that an SCB msg which is not a CC txn is
-        counted as an SCB msg but produces neither a txn nor a skip — only
-        txn *attempts* may count as skipped, otherwise SCB_SKIPPED would fill
-        up with statements and payment receipts.
+    def test_a_msg_from_the_second_sender_reaches_the_report(self):
+        """The end-to-end form of H1.
+
+        Before `9220` was declared, this message was counted in OTHER and its
+        spending never appeared in any total.
         """
-        parser = self._parseBackup(
-            [
-                self._createScbSms(
-                    "Dear Customer, your statement for SCBPL Credit Card "
-                    "ending 1280 is now available."
-                )
-            ]
+        report = self._parseBackup([self._sms(txnBody(), SCB_SECOND_SENDER)])
+
+        self.assertEqual(len(report.ccTxns), 1)
+        self.assertEqual(report.ccTxns[0].bank, "SCB")
+        self.assertEqual(report.count("SCB"), 1)
+        self.assertEqual(report.count("OTHER"), 0)
+
+    def test_a_non_txn_msg_is_counted_but_not_parsed(self):
+        body = (
+            "Dear Customer, Thank you. Your MASTERCARD STANDARD Card "
+            "5452xxxxxxxx1280 payment of Rs 750.00 has been received."
         )
 
-        self.assertEqual(parser.msgCounts["SCB"], 1)
-        self.assertEqual(parser.msgCounts["SCB_SKIPPED"], 0)
-        self.assertEqual(parser.ccTxns, [])
+        report = self._parseBackup([self._sms(body)])
+
+        self.assertEqual(len(report.ccTxns), 0)
+        self.assertEqual(report.count("SCB"), 1)
+        self.assertEqual(report.count("SCB_SKIPPED"), 0)
+
+    def test_an_scb_duplicate_is_flagged_ambiguous(self):
+        """SCB alerts carry a date but no time of day.
+
+        A second genuine identical purchase that day is indistinguishable from a
+        retransmission, so the collapse is reported rather than assumed correct.
+        """
+        report = self._parseBackup([self._sms(txnBody()), self._sms(txnBody())])
+
+        self.assertEqual(report.count("DUP"), 1)
+        self.assertEqual(report.ambiguousDuplicates, 1)
 
 
 if __name__ == "__main__":
-    # to run this script:
-    #   cd /path/to/src sub-directory
-    #   python -m unittest discover -s ..\tests\ -v
-    #
     unittest.main()

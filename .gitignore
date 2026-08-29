@@ -9,5 +9,22 @@ __pycache__/
 # uv.lock IS committed — it is the reproducibility guarantee.
 .uv-cache/
 
+# Build artefacts
+dist/
+build/
+*.egg-info/
+
+# Tooling caches
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Local data — SMS backups contain personal financial data, never commit them
 *.xml
+
+# ...with one deliberate exception. The synthetic corpus is entirely invented
+# data using the banks' real message templates, and it is the only corpus CI can
+# run against: the real backup is one person's financial history and never
+# leaves this machine. It must be committed, so it is excluded from the rule
+# above. Regenerate it with tests/fixtures/build_synthetic_backup.py.
+!tests/fixtures/synthetic_backup.xml

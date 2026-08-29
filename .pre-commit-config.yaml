@@ -1,0 +1,32 @@
+# Fast checks only. Anything that needs the full environment belongs in CI --
+# a slow pre-commit hook is a hook people learn to bypass with --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: no-commit-to-branch
+        args: [--branch, main]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: local
+    hooks:
+      # An SMS backup is personal financial data and is gitignored, but a
+      # gitignore is a default rather than a guarantee -- `git add -f` walks
+      # straight past it. This does not.
+      - id: no-sms-backups
+        name: refuse to commit an SMS backup
+        entry: python -c "import sys; bad=[p for p in sys.argv[1:] if p.startswith('sms-') and p.endswith('.xml')]; sys.exit('refusing to commit what looks like an SMS backup: ' + ', '.join(bad)) if bad else None"
+        language: system
+        files: '\.xml$'

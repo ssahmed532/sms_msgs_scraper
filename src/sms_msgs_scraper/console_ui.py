@@ -1,33 +1,32 @@
-"""The shared Rich console, theme and formatting helpers behind everything this
-tool prints.
+"""The shared Rich consoles, the theme, and the cell helpers behind everything
+this tool prints.
 
-Every module renders through the single `console` defined here rather than
-through bare `print()`, so that one theme decides what a bank tag, a currency,
-an amount, a txn type or a warning looks like — wherever it is rendered.
+**There are two consoles, and which one a thing goes to is a contract.**
 
-Three choices here are load-bearing, and each has something in the repo that
-would break if it were reversed:
+  * `console` writes to **stdout**, and carries *results* only -- the rows a
+    command was asked for, and nothing else.
+  * `errConsole` writes to **stderr**, and carries everything *about* the run:
+    the header, the parse summary, progress, notices and parse diagnostics.
 
-  * **All output goes to stdout, warnings included.**
-    `scripts/verify_against_backup.py` swallows the parsers' per-msg warnings
-    with `redirect_stdout` precisely because they can identify a msg in a
-    personal backup, and `tests/test_scb_sms_parser.py` asserts on that same
-    stream. Routing warnings to stderr would leak them past both.
+That split is what makes the tool usable from a script. Piping stdout gives the
+data and only the data, while the reader still sees the diagnostics on their
+terminal. Previously every one of those went to stdout together, so anything
+consuming the output had to parse the furniture back out of the data -- and a
+parse warning naming a skipped message landed in the middle of a CSV.
 
-  * **The console is built without a `file`.** Rich then resolves `sys.stdout`
-    at write time rather than capturing it at import time, which is what keeps
-    `redirect_stdout` working and what makes a non-tty (a pipe, a StringIO)
-    render as plain, uncoloured, un-ANSI-escaped text.
+Two further choices are load-bearing:
 
-  * **Warnings render with `markup=False` and `soft_wrap=True`.** The HBL
-    parser's warnings still carry msg bodies, and a body containing `[...]`
-    would otherwise be eaten as Rich console markup. Soft wrapping keeps the
-    convention that one parse failure is exactly one line, which the
-    verification harness counts.
+  * **Neither console is built with a `file`.** Rich then resolves the stream at
+    write time rather than capturing it at import, which is what keeps
+    `redirect_stdout` / `redirect_stderr` and Click's `CliRunner` working, and
+    what makes a non-tty render as plain, uncoloured text.
 
-Colour is turned off automatically when stdout is not a terminal, and honours
-the `NO_COLOR` and `TERM=dumb` environment variables; `--no-color` on the CLI
-sets it off explicitly.
+  * **Diagnostics render with `markup=False` and `soft_wrap=True`**, so a
+    vendor name containing brackets is never read as console markup and one
+    parse failure stays exactly one line.
+
+Colour is dropped automatically when the stream is not a terminal, and honours
+`NO_COLOR` and `TERM=dumb`; `--no-color` sets it off explicitly on both.
 """
 
 import sys
@@ -43,17 +42,19 @@ from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
-# Windows hands back a cp1252 stream the moment stdout is redirected to a file
-# or a pipe, and neither Rich's box-drawing characters nor the placeholder glyph
-# below are encodable there — `... > out.txt` would die on a UnicodeEncodeError
-# rather than render. The console itself is fine; the stream underneath is not.
-#
+from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.types import CardReference
+
+# Windows hands back a cp1252 stream the moment stdout or stderr is redirected
+# to a file or a pipe, and Rich's box-drawing characters are not encodable
+# there -- `... > out.txt` would die on a UnicodeEncodeError rather than render.
 # stderr matters just as much and for a different reason: it defaults to
 # errors="backslashreplace", so rich_click's usage-error panel came out as rows
-# of literal ┌-style escape text instead of a box whenever it was redirected.
+# of literal escape text whenever it was redirected.
 for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8")
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8")
 
 APP_THEME = Theme(
     {
@@ -83,7 +84,7 @@ APP_THEME = Theme(
         "bank.SCB": "bold magenta",
         "bank.MEZN": "bold yellow",
         "bank.unknown": "dim",
-        # the txn currency — amounts are coloured by it, so a USD figure never
+        # the txn currency -- amounts are coloured by it, so a USD figure never
         # reads as a PKR one at a glance
         "currency.PKR": "green",
         "currency.USD": "bright_cyan",
@@ -104,7 +105,17 @@ APP_THEME = Theme(
 )
 
 console = Console(theme=APP_THEME, highlight=False)
-"""The one console every module writes through."""
+"""Results, and only results. Written to stdout."""
+
+errConsole = Console(theme=APP_THEME, highlight=False, stderr=True)
+"""Everything about the run rather than in it. Written to stderr."""
+
+
+def setNoColor() -> None:
+    """Turn colour off explicitly on both consoles."""
+    console.no_color = True
+    errConsole.no_color = True
+
 
 # Shown for a field the msg simply did not carry (an FBL txn has no card digits,
 # an uppercase Meezan transfer has no account clause), and for a zero total in a
@@ -115,6 +126,19 @@ EMPTY_VALUE = "—"
 # show 00:00:00, which is honest: that is exactly what the bank sent.
 TXN_DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Control characters have no business in a terminal cell. A vendor name comes
+# out of an SMS, and an SMS is not a trusted source: an escape sequence in one
+# could reposition the cursor, recolour the rest of the session, or hide
+# following output entirely. Stripped at the point of rendering, and also at the
+# field boundary for machine output.
+_CONTROL_CHARS = {code: None for code in range(0x20) if code not in (0x09,)}
+_CONTROL_CHARS.update(dict.fromkeys(range(127, 160)))
+
+
+def sanitizeField(value: str) -> str:
+    """Strip control characters out of a string that came from an SMS."""
+    return str(value).translate(_CONTROL_CHARS)
+
 
 def _styleFor(prefix: str, value) -> str:
     """Resolve a themed style name for a data value, falling back to the
@@ -122,14 +146,7 @@ def _styleFor(prefix: str, value) -> str:
 
     The fallback is not decorative. A bank parser accepts any 3-letter currency
     code, and a new bank or debit type can be added without touching this
-    module — none of those may raise a MissingStyle at render time.
-
-    Args:
-        prefix (str): the theme namespace, e.g. "bank" or "currency"
-        value: the data value naming the style within that namespace
-
-    Returns:
-        str: a style name that exists in APP_THEME
+    module -- none of those may raise a MissingStyle at render time.
     """
     styleName = f"{prefix}.{value}"
 
@@ -146,29 +163,26 @@ def currencyText(currency: str) -> Text:
     return Text(str(currency), style=_styleFor("currency", currency))
 
 
-def amountText(amount: float, currency: str) -> Text:
-    """Render a txn amount, thousands-grouped to 2dp, in its currency's colour.
+def amountText(money: Money) -> Text:
+    """Render a transaction amount, grouped to its currency's scale.
 
-    Args:
-        amount (float): the txn amount
-        currency (str): the currency it is denominated in, which picks the colour
-
-    Returns:
-        Text: e.g. a green "25,170.49" for PKR
+    Takes a `Money`, so the value being rendered is exact and the formatting is
+    the only place a scale is applied -- an amount too precise for its currency
+    was refused at construction rather than rounded away here.
     """
-    return Text(f"{amount:,.2f}", style=_styleFor("currency", currency))
+    return Text(money.formatted(), style=_styleFor("currency", money.currency))
 
 
-def totalText(amount: float, currency: str) -> Text:
-    """Render a monthly / grand total, showing a zero as the empty placeholder.
+def totalText(money: Money | None, currency: str) -> Text:
+    """Render a monthly / grand total, showing nothing as the empty placeholder.
 
-    A monthly summary pre-seeds PKR/USD/CAD for every month, so most cells in a
-    currency column are structurally zero rather than meaningfully zero.
+    A monthly summary pre-seeds every currency column for every month, so most
+    cells are structurally absent rather than meaningfully zero.
     """
-    if not amount:
+    if money is None or not money.amount:
         return Text(EMPTY_VALUE, style="column.empty")
 
-    return Text(f"{amount:,.2f}", style=_styleFor("currency", currency))
+    return Text(money.formatted(), style=_styleFor("currency", currency))
 
 
 def txnTypeText(txnType) -> Text:
@@ -181,17 +195,17 @@ def dateText(txnDate: datetime) -> Text:
     return Text(txnDate.strftime(TXN_DATETIME_FMT), style="column.date")
 
 
-def cardText(lastFourDigits: int) -> Text:
-    """Render a masked card number from its last 4 digits.
+def cardText(card: CardReference) -> Text:
+    """Render a masked card number, or the placeholder when there was none.
 
-    FBL msgs carry no card digits at all and SCB's BIN-only masks carry none
-    either, both of which reach here as 0 — shown as the empty placeholder
-    rather than as a card ending 0000.
+    FBL messages carry no card digits at all and SCB's BIN-only masks carry none
+    either. Both are an *absent* card reference now, which is why a real card
+    ending 0000 can be shown as one instead of being mistaken for absence.
     """
-    if lastFourDigits <= 0:
+    if not card.known:
         return Text(EMPTY_VALUE, style="column.empty")
 
-    return Text(f"••••{lastFourDigits:04d}", style="column.card")
+    return Text(f"••••{card.lastFour}", style="column.card")
 
 
 def acctText(acctMask: str) -> Text:
@@ -199,16 +213,17 @@ def acctText(acctMask: str) -> Text:
     if not acctMask:
         return Text(EMPTY_VALUE, style="column.empty")
 
-    return Text(acctMask, style="column.acct")
+    return Text(sanitizeField(acctMask), style="column.acct")
 
 
 def vendorText(vendor: str) -> Text:
     """Render a vendor name.
 
     Wrapped as Text rather than passed as a str so that Rich never reads a
-    bracketed vendor name as console markup.
+    bracketed vendor name as console markup, and sanitised so that an escape
+    sequence in a message body cannot reach the terminal.
     """
-    return Text(vendor, style="column.vendor")
+    return Text(sanitizeField(vendor), style="column.vendor")
 
 
 def indexText(index: int) -> Text:
@@ -225,23 +240,16 @@ def labelText(label: str, style: str = "subheading") -> Text:
     """Render an arbitrary label in a themed style.
 
     Exists so that callers can style a cell without importing `rich.text`
-    themselves — Rich stays behind this module.
+    themselves -- Rich stays behind this module.
     """
     return Text(str(label), style=style)
 
 
-def dataTable(columns: list, caption: str = None) -> Table:
-    """Build the table used for a listing — one row per txn or vendor.
+def dataTable(columns: list, caption: str | None = None) -> Table:
+    """Build the table used for a listing -- one row per txn or vendor.
 
     Deliberately light furniture: a listing can run to thousands of rows, and
     ruled cells turn that into a wall.
-
-    Args:
-        columns (list): (header, kwargs) pairs passed straight to add_column
-        caption (str | None): a dim line under the table, e.g. the breakdown
-
-    Returns:
-        Table: an empty table ready for add_row
     """
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -259,17 +267,8 @@ def dataTable(columns: list, caption: str = None) -> Table:
     return table
 
 
-def summaryTable(title: str = None, showFooter: bool = False) -> Table:
-    """Build the table used for a summary — a handful of rows worth boxing.
-
-    Args:
-        title (str | None): the table's heading, or None when the caller has
-                            already introduced it with a rule and a notice line
-        showFooter (bool): whether a totals row is rendered under the columns
-
-    Returns:
-        Table: an empty table ready for add_column / add_row
-    """
+def summaryTable(title: str | None = None, showFooter: bool = False) -> Table:
+    """Build the table used for a summary -- a handful of rows worth boxing."""
     return Table(
         title=title,
         title_style="table.title",
@@ -283,40 +282,36 @@ def summaryTable(title: str = None, showFooter: bool = False) -> Table:
 
 
 def printSideBySide(*renderables) -> None:
-    """Print renderables in a row, wrapping to the next line if the terminal is
-    too narrow to hold them side by side.
+    """Print renderables in a row on stderr, wrapping if the terminal is too
+    narrow to hold them side by side.
+
+    Parse summaries describe the run rather than answer the question, so they
+    belong on stderr with the rest of the furniture.
     """
-    console.print(Columns(renderables, padding=(0, 4)))
+    errConsole.print(Columns(renderables, padding=(0, 4)))
 
 
 def printRule(title: str) -> None:
-    """Open a command's output with a titled horizontal rule."""
-    console.print()
-    console.print(Rule(Text(title, style="heading"), style="heading", align="left"))
+    """Open a command's output with a titled horizontal rule, on stderr."""
+    errConsole.print()
+    errConsole.print(Rule(Text(title, style="heading"), style="heading", align="left"))
 
 
 def statusSpinner(message: str):
-    """A spinner to show while a slow step runs — and nothing at all when
-    output is not a terminal.
+    """A spinner to show while a slow step runs -- and nothing at all when
+    stderr is not a terminal.
 
     Rich renders a Live display once on stop when it has no terminal to animate,
-    which would leave a stray "Reading the backup file..." line in every piped
-    or redirected run. A progress indicator has no meaning outside a terminal,
-    so there simply isn't one.
+    which would leave a stray progress line in every piped or redirected run.
     """
-    if console.is_terminal:
-        return console.status(message, spinner="dots")
+    if errConsole.is_terminal:
+        return errConsole.status(message, spinner="dots")
 
     return nullcontext()
 
 
 def printHeader(title: str, fields: dict) -> None:
-    """Open the run with a panel naming the tool and what it is working on.
-
-    Args:
-        title (str): the panel title
-        fields (dict): label -> value rows shown inside the panel
-    """
+    """Open the run with a panel naming the tool and what it is working on."""
     body = Table.grid(padding=(0, 3))
     body.add_column(style="muted")
     body.add_column(overflow="fold")
@@ -324,8 +319,8 @@ def printHeader(title: str, fields: dict) -> None:
     for label, value in fields.items():
         body.add_row(Text(label, style="muted"), Text(str(value), style="subheading"))
 
-    console.print()
-    console.print(
+    errConsole.print()
+    errConsole.print(
         Panel(
             body,
             title=Text(title, style="heading"),
@@ -338,8 +333,8 @@ def printHeader(title: str, fields: dict) -> None:
 
 
 def printNotice(message: str) -> None:
-    """Print an informational line — what is about to happen, or what was found."""
-    console.print(Text(message, style="info"))
+    """Print an informational line -- what is about to happen, or what was found."""
+    errConsole.print(Text(message, style="info"))
 
 
 def printEmptyState(message: str) -> None:
@@ -348,8 +343,8 @@ def printEmptyState(message: str) -> None:
     A filter that matches nothing renders as a panel rather than as a table with
     a header and no rows, which reads as a bug.
     """
-    console.print()
-    console.print(
+    errConsole.print()
+    errConsole.print(
         Panel(
             Text(message, style="muted"),
             border_style="muted",
@@ -360,15 +355,14 @@ def printEmptyState(message: str) -> None:
 
 
 def printWarning(message: str) -> None:
-    """Print one parse-failure warning line.
+    """Print one parse-failure line on stderr.
 
-    `markup=False` because the HBL parser's warnings still carry msg bodies, and
-    `soft_wrap=True` so that one failure stays exactly one line however long the
-    reason is — `scripts/verify_against_backup.py` counts these.
+    `markup=False` so a bracketed value is never read as console markup, and
+    `soft_wrap=True` so one failure stays exactly one line.
     """
-    console.print(message, style="warning", markup=False, soft_wrap=True)
+    errConsole.print(message, style="warning", markup=False, soft_wrap=True)
 
 
 def printError(message: str) -> None:
-    """Print one parse-error line. Same wrapping and markup rules as a warning."""
-    console.print(message, style="error", markup=False, soft_wrap=True)
+    """Print one error line. Same wrapping and markup rules as a warning."""
+    errConsole.print(message, style="error", markup=False, soft_wrap=True)

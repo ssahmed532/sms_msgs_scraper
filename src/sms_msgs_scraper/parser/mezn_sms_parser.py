@@ -1,31 +1,36 @@
+"""Meezan Bank account debit alerts.
+
+Five template families, matched in order, mapping onto four kinds of debit.
+"""
+
 import re
-import xml.etree.ElementTree
 from datetime import datetime
 
-from cc_txn import CurrencyAmountTuple
-from common import DEFAULT_TZ
-from console_ui import printError
-from debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.common import DEFAULT_TZ
+from sms_msgs_scraper.debit_txn import DebitTxnDC, DebitTxnType
+from sms_msgs_scraper.domain.diagnostics import ParseDiagnostic, ParseResult, SkipReason
+from sms_msgs_scraper.domain.message import SmsRecord
+from sms_msgs_scraper.domain.money import AMOUNT_TOKEN_2DP_RE, Money, MoneyError
 
 
 class MeznSmsParser:
     ID = "MEZN"
-    # SMS messages from any one of these short codes will be assumed to be
-    # from Meezan Bank. Both codes are live: they carry the same message
-    # templates, so history spans both.
-    MEZN_SHORT_CODES = ["8079", "9779"]
 
     # Shared building blocks of the debit txn templates. Every Meezan debit
     # alert opens with the amount, and every one of them carries the txn
     # date/time in the same "on DD-Mon-YY at HH:MM" shape.
-    MEZN_AMOUNT_RE = r"(?P<currency>[A-Z]{3}) (?P<amount>[\d,]+\.\d{2})"
+    #
+    # The amount uses the shared two-decimal grammar, so malformed grouping is
+    # rejected rather than repaired by stripping the commas out, and the digit
+    # length is bounded.
+    MEZN_AMOUNT_RE = rf"(?P<currency>[A-Z]{{3}}) (?P<amount>{AMOUNT_TOKEN_2DP_RE})"
     MEZN_DATE_RE = (
         r"on (?P<txndate>\d{1,2}-[A-Za-z]{3}-(?:\d{4}|\d{2})) "
         r"at (?P<txntime>\d{1,2}:\d{2})"
     )
 
     # The five validated debit templates, as (txn type, pattern) pairs matched
-    # in order — first match wins. The trailing junk after the date varies a
+    # in order -- first match wins. The trailing junk after the date varies a
     # lot between msgs (TID:, UAN, "Fee: Rs.X", "Bal:", or a bare " ."), so
     # none of these patterns anchor the end of the body.
     #
@@ -81,15 +86,20 @@ class MeznSmsParser:
             # The fallback for transfer notices that carry no account clause at
             # all (uppercase only), so acctMask stays empty for these.
             DebitTxnType.FUNDS_TRANSFER,
-            re.compile(
-                MEZN_AMOUNT_RE + r" SENT TO (?P<vendor>.+?) " + MEZN_DATE_RE
-            ),
+            re.compile(MEZN_AMOUNT_RE + r" SENT TO (?P<vendor>.+?) " + MEZN_DATE_RE),
         ),
     ]
 
     # The amount head every debit alert opens with. Load-bearing part of the
-    # txn signal: a card-dispatch notice on these short codes reads "…has been
+    # txn signal: a card-dispatch notice on these short codes reads "...has been
     # sent to your [address]" and must not be mistaken for a funds transfer.
+    #
+    # Deliberately the *permissive* amount shape rather than the shared grammar
+    # the templates use. The signal has to stay looser than extraction: a body
+    # whose amount is malformed must still be recognised as an attempted debit,
+    # so that it fails extraction and is counted and reported. Tighten this and
+    # such a message becomes an ordinary Meezan message with nothing logged --
+    # precisely the silent gap the independent signal exists to prevent.
     MEZN_AMOUNT_HEAD_PTTRN = re.compile(r"[A-Z]{3} [\d,]+\.\d{2} ")
 
     # Keywords that identify a debit, and keywords that rule one out (credits,
@@ -106,7 +116,7 @@ class MeznSmsParser:
     #   28-Sep-23 19:42     (2-digit year; the original format)
     #   28-Apr-2025 9:05    (4-digit year; appeared around Apr 2025)
     # Either order works: strptime's %Y matches exactly 4 digits and %y
-    # exactly 2, so the two formats are mutually exclusive — neither can
+    # exactly 2, so the two formats are mutually exclusive -- neither can
     # mis-read the other's year.
     MEZN_TXN_DATETIME_FMTS = ("%d-%b-%y %H:%M", "%d-%b-%Y %H:%M")
 
@@ -114,32 +124,28 @@ class MeznSmsParser:
     def _normalizeWhitespace(strValue: str) -> str:
         """Collapse runs of whitespace in a msg body into single spaces.
 
-        Note: SmsBackupFileParser.calcSmsMsgHash hashes the raw *stripped*
-        body, while this normalizes internal whitespace too — so two Meezan
-        bodies differing only in internal spacing hash differently and both
-        parse. Real duplicates are byte-identical retransmissions, so that is
-        acceptable. Normalizing costs nothing and keeps both the txn signal
-        and the template regexes robust against spacing wobble.
+        Note: the duplicate identity hashes the raw *stripped* body, while this
+        normalizes internal whitespace too -- so two Meezan bodies differing
+        only in internal spacing hash differently and both parse. Real
+        duplicates are byte-identical retransmissions, so that is acceptable.
+        Normalizing costs nothing and keeps both the txn signal and the template
+        regexes robust against spacing wobble.
         """
         return re.sub(r"\s+", " ", strValue).strip()
 
     @staticmethod
-    def isSmsFromMezn(sms: xml.etree.ElementTree.Element) -> bool:
-        return sms.attrib["address"] in MeznSmsParser.MEZN_SHORT_CODES
-
-    @staticmethod
-    def isMsgDebitTxn(sms: xml.etree.ElementTree.Element) -> bool:
+    def isTxnMsg(record: SmsRecord) -> bool:
         """Report whether this msg looks like an account debit notification.
 
         This is an independent keyword signal, deliberately looser than the
         template regexes in MEZN_DEBIT_TXN_PTTRNS. If the signal were simply
         "one of the templates matches", then a changed Meezan template would
-        be counted as a plain Meezan msg and *nothing would be logged* — the
+        be counted as a plain Meezan msg and *nothing would be logged* -- the
         same silent-gap failure this app hit when HBL re-homed its CC alerts
         to a new short code. Kept separate, template drift shows up as a
-        skipped-msg warning instead.
+        skipped-msg diagnostic instead.
         """
-        msgBody = MeznSmsParser._normalizeWhitespace(sms.attrib["body"])
+        msgBody = MeznSmsParser._normalizeWhitespace(record.body)
 
         if not MeznSmsParser.MEZN_AMOUNT_HEAD_PTTRN.match(msgBody):
             return False
@@ -151,110 +157,84 @@ class MeznSmsParser:
         ):
             return False
 
-        if any(
+        return not any(
             keyword in foldedBody for keyword in MeznSmsParser.MEZN_NON_DEBIT_KEYWORDS
-        ):
-            return False
-
-        return True
+        )
 
     @staticmethod
-    def _extractCurrencyAndAmount(
-        currencyValue: str, amountValue: str
-    ) -> CurrencyAmountTuple:
-        try:
-            return CurrencyAmountTuple(
-                currencyValue.strip(), float(amountValue.strip().replace(",", ""))
-            )
-        except ValueError:
-            printError(
-                f"ERROR: unable to parse Meezan txn amount into float value: "
-                f"{amountValue}"
-            )
-
-        return CurrencyAmountTuple(None, -1.2345)
+    def _skip(record: SmsRecord, reason: SkipReason, detail: str = "") -> ParseResult:
+        return ParseResult.failed(
+            ParseDiagnostic.forRecord(MeznSmsParser.ID, record, reason, detail)
+        )
 
     @staticmethod
-    def _convertToDateTime(dateValue: str, timeValue: str) -> datetime:
+    def _convertToDateTime(dateValue: str, timeValue: str) -> datetime | None:
         strValue = f"{dateValue} {timeValue}"
 
         for datetimeFmt in MeznSmsParser.MEZN_TXN_DATETIME_FMTS:
             try:
                 # All timestamps in an SMS backup file are Karachi local time,
-                # so the parsed value is *stamped* with that zone, not
-                # converted into it. astimezone() would instead read the naive
-                # value as the host machine's local time and shift it — enough
-                # to move a txn across a day boundary on any machine not set
-                # to +05:00.
+                # so the parsed value is *stamped* with that zone, not converted
+                # into it. astimezone() would instead read the naive value as
+                # the host machine's local time and shift it -- enough to move a
+                # txn across a day boundary on any machine not set to +05:00.
                 return datetime.strptime(strValue, datetimeFmt).replace(
                     tzinfo=DEFAULT_TZ
                 )
             except ValueError:
                 continue
 
-        printError(f"ERROR: unable to parse Meezan txn date/time: {strValue}")
-
         return None
 
     @staticmethod
-    def extractDetailsFromTxnMsg(sms: xml.etree.ElementTree.Element) -> DebitTxnDC:
+    def extract(record: SmsRecord) -> ParseResult:
         """Extract the debit txn details out of a Meezan debit SMS msg.
 
-        Returns:
-            DebitTxnDC: the parsed txn, or None when the msg matches none of
-                        the known templates or carries an unparseable
-                        date/amount. Failures are reported and skipped, never
-                        raised — a malformed msg must not abort a whole run.
+        Returns a diagnostic, never an exception, when the msg matches none of
+        the known templates or carries an unparseable date or amount.
         """
-        msgBody = MeznSmsParser._normalizeWhitespace(sms.attrib["body"])
-        # Warnings identify the msg by the date it was received, never by its
-        # body: a Meezan debit body carries the payee, the account mask and the
-        # running balance.
-        receivedOn = sms.attrib.get("readable_date", "?")
+        msgBody = MeznSmsParser._normalizeWhitespace(record.body)
 
         for txnType, pattern in MeznSmsParser.MEZN_DEBIT_TXN_PTTRNS:
             m = pattern.match(msgBody)
             if not m:
                 continue
 
-            currencyAndAmount = MeznSmsParser._extractCurrencyAndAmount(
-                m.group("currency"), m.group("amount")
-            )
-            if (not currencyAndAmount.currency) or (currencyAndAmount.amount <= 0):
-                printError(
-                    f"ERROR: bad amount in Meezan debit msg received on {receivedOn}"
-                )
-                return None
+            try:
+                money = Money.parse(m.group("currency"), m.group("amount"))
+            except MoneyError:
+                return MeznSmsParser._skip(record, SkipReason.BAD_AMOUNT)
 
-            datetimeObj = MeznSmsParser._convertToDateTime(
+            if not money.isPositive:
+                return MeznSmsParser._skip(
+                    record, SkipReason.BAD_AMOUNT, "amount is not positive"
+                )
+
+            txnDate = MeznSmsParser._convertToDateTime(
                 m.group("txndate"), m.group("txntime")
             )
-            if not datetimeObj:
-                return None
+            if txnDate is None:
+                return MeznSmsParser._skip(record, SkipReason.BAD_DATE)
 
             vendor = m.group("vendor").strip()
             if not vendor:
-                printError(
-                    f"ERROR: empty vendor in Meezan debit msg received on {receivedOn}"
-                )
-                return None
+                return MeznSmsParser._skip(record, SkipReason.MISSING_VENDOR)
 
             # The uppercase transfer template has no account clause at all.
-            acctMask = (
-                m.group("acmask").strip() if "acmask" in m.groupdict() else ""
+            acctMask = m.group("acmask").strip() if "acmask" in m.groupdict() else ""
+
+            return ParseResult.ok(
+                DebitTxnDC(
+                    money=money,
+                    date=txnDate,
+                    vendor=vendor,
+                    txnType=txnType,
+                    acctMask=acctMask,
+                )
             )
 
-            return DebitTxnDC(
-                amountTuple=currencyAndAmount,
-                date=datetimeObj,
-                vendor=vendor,
-                txnType=txnType,
-                acctMask=acctMask,
-            )
-
-        printError(
-            "ERROR: unable to match any Meezan debit template against msg "
-            f"received on {receivedOn}"
+        return MeznSmsParser._skip(
+            record,
+            SkipReason.NO_TEMPLATE_MATCH,
+            "matched no known Meezan debit template",
         )
-
-        return None

@@ -1,0 +1,60 @@
+name: CI
+
+# Windows and Python 3.14 only, deliberately.
+#
+# This project has chosen Windows 11 and Python 3.14 as single targets rather
+# than floors: it carries no cross-platform branches and no back-compatibility
+# shims. An ubuntu leg would therefore test a configuration nobody supports and
+# would fail on things nobody intends to fix -- worse than no CI, because a red
+# build people learn to ignore stops being a signal.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync the locked environment
+        # --frozen so the lockfile is enforced rather than trusted: a
+        # pyproject edit that was never followed by `uv lock` fails here
+        # instead of resolving to something nobody recorded.
+        run: uv sync --frozen --all-extras
+
+      - name: Lint
+        run: uv run --with ruff ruff check .
+
+      - name: Type check
+        run: uv run --with pyright pyright
+
+      - name: Tests, with branch coverage
+        # The public suite only. It runs against the synthetic corpus in
+        # tests/fixtures/, which contains no real data.
+        run: |
+          uv run --with coverage coverage run -m unittest discover -s tests/ -v
+          uv run --with coverage coverage report
+
+      - name: Installed-wheel smoke test
+        run: |
+          uv build
+          uv run --no-project --with dist/sms_msgs_scraper-2.0.0-py3-none-any.whl sms-txn --version
+
+  # The real corpus is one person's financial history. It is never committed and
+  # never reaches CI, so verifying against it stays a local step -- run
+  # `uv run python scripts/verify_against_backup.py` before releasing. This job
+  # exists to state that explicitly rather than leave its absence to be noticed.
+  private-corpus:
+    runs-on: windows-latest
+    if: false
+    steps:
+      - run: echo "Run scripts/verify_against_backup.py locally against the reference backup."

@@ -6,8 +6,11 @@
 **Target release:** 2.0.0
 **Visual roadmap:** <https://claude.ai/code/artifact/be5c6fca-d781-430d-a9ea-2b207abc244d>
 
-**Status: plan only.** No code has been changed and no work item has been started. Implementation
-begins at Wave 0.
+**Status: executed, 2026-08-29.** All six waves are implemented and shipped as 2.0.0. Every work
+item's exit criteria were met, with two deliberate departures recorded in
+[Departures during execution](#departures-during-execution) at the end of this document. The plan is
+kept as written — it is the record of what was intended, and the departures are noted against it
+rather than edited into it.
 
 ## Scope
 
@@ -465,3 +468,54 @@ incurred.
 
 All three version locations move together and `uv lock` is re-run. The lockfile is the one nothing
 prompts you to update, which is why a test already pins it.
+
+## Departures during execution
+
+Two decisions during implementation differ from the plan as written. Both are recorded here rather
+than edited into the text above, so the plan stays a record of what was intended.
+
+### WI-12 — an unrecognised SCB card mask keeps its transaction
+
+The plan says card masks become a `CardReference` that keeps `0000` distinct from absent. Written
+literally against the `ParseResult` contract, an unrecognised mask shape would have become a
+*failure*, discarding the transaction.
+
+That trades real spending for a cosmetic field. The amount, date and vendor of such a message are
+all present and correct; only the card is unusable. But silently recording it as having no card is
+exactly what a change in the bank's masking would look like, which is the thing the old warning
+existed to prevent.
+
+**Resolution:** `ParseResult.okWithWarning(txn, diagnostic)` — the transaction is kept and the mask
+shape is still reported. This preserves 1.1.0's behaviour while giving the observation a type.
+
+### WI-11 — FBL keeps a separator-free amount grammar
+
+The plan says FBL should "adopt the shared full-match grammar, parameterised for FBL's
+separator-free amounts". The shared grammar's general form accepts comma grouping, and applying it
+unparameterised would have widened what the FBL parser accepts.
+
+Faysal Bank has never sent a comma in an amount, across 583 transactions. A comma-grouped body on
+FBL's short code is therefore far more likely to be a template change worth reporting than an amount
+worth trusting.
+
+**Resolution:** a third shared token pattern, `AMOUNT_TOKEN_PLAIN_RE`, used by FBL alone. The
+grammar is still centralised — FBL owns no amount regex of its own — but the parser accepts exactly
+what it accepted before, and a comma-grouped body lands in `FBL_SKIPPED` where someone will see it.
+
+## Verification of the completed program
+
+| Check | Result |
+|---|---|
+| Test suite (`unittest discover -s tests/`, from the repo root) | 283 pass |
+| Branch coverage | 93% (threshold 90%) |
+| `ruff check .` | clean, with no per-file ignores |
+| `pyright` | 0 errors |
+| `python -O` parity | byte-identical parse output |
+| Corpus verifier against the reference backup | `RESULT: PASS` |
+| Verifier with `9220` removed from the registry | **FAILS**, discovery finding first |
+| Wheel build + install + `sms-txn --version` | 2.0.0 from wheel metadata |
+
+The seventh row is the one that matters. Before this program, deleting a sender from the routing
+chain produced a green verifier and a green suite; the omission was invisible precisely because
+every check was expectation-based. The discovery scan now fails on it without anyone having written
+an expectation about that sender.
