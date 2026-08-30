@@ -35,7 +35,7 @@ from datetime import datetime
 
 from rich import box
 from rich.columns import Columns
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
@@ -96,6 +96,28 @@ APP_THEME = Theme(
         "txntype.account_debit": "magenta",
         "txntype.funds_transfer": "blue",
         "txntype.unknown": "dim",
+        # chart series, for a breakdown that has no identity of its own to
+        # colour by -- a vendor. Bank and debit-type breakdowns keep the
+        # `bank.*` and `txntype.*` styles above instead, so a bank is the same
+        # colour in a chart that it is in every table.
+        #
+        # Four slots and no more, and the four are computed rather than
+        # chosen. A terminal background may be near-black or near-white, so
+        # each has to sit in the lightness band that works against both, and
+        # that band is narrow enough that a fifth well-separated hue does not
+        # fit in it. Measured in OKLab (dE x100, `--pairs all`, both surfaces):
+        # worst protan/deutan separation 14.6 against a target of 8, worst
+        # normal-vision separation 16.2 against a floor of 15.
+        #
+        # Colour is never the only encoding: each series also carries its own
+        # block glyph and a fixed position in the stack, which is what keeps
+        # the chart readable for a tritanope (worst tritan dE 3.3) and in a
+        # terminal rendering without colour at all.
+        "series.1": "#259cde",
+        "series.2": "#995b00",
+        "series.3": "#3da97b",
+        "series.4": "#8c5587",
+        "series.other": "dim",
         # msg-routing buckets in the parse summary
         "bucket.parsed": "bold white",
         "bucket.other": "dim",
@@ -243,6 +265,27 @@ def labelText(label: str, style: str = "subheading") -> Text:
     themselves -- Rich stays behind this module.
     """
     return Text(str(label), style=style)
+
+
+def segmentsText(parts) -> Text:
+    """Assemble one line out of (content, style) pairs.
+
+    A chart bar is many differently-styled runs on one line, which no cell
+    helper above can express. This is the general form of them, and it exists
+    here rather than in the chart renderer so that Rich stays behind this
+    module: a caller composes a line without importing `rich.text` itself.
+    """
+    line = Text()
+
+    for content, style in parts:
+        line.append(content, style=style)
+
+    return line
+
+
+def stackedGroup(*renderables):
+    """Several renderables printed as one block, for the same reason."""
+    return Group(*renderables)
 
 
 def dataTable(columns: list, caption: str | None = None) -> Table:
