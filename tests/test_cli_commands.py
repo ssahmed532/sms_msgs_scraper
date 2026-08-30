@@ -22,6 +22,7 @@ from sms_msgs_scraper.sms_txn_query_tool import (
     list_all_vendors,
     monthly_cc_spending_summary,
     monthly_debit_spending_summary,
+    monthly_vendor_chart,
 )
 
 HBL_TXN_BODY = (
@@ -107,6 +108,7 @@ class TestCommandRegistration(CliTestCase):
             "cc_spend_for_month": cc_spend_for_month,
             "list_all_debit_txns": list_all_debit_txns,
             "monthly_debit_spending_summary": monthly_debit_spending_summary,
+            "monthly_vendor_chart": monthly_vendor_chart,
         }
 
         self.assertEqual(set(cli.commands), set(expected))

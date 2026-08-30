@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.2.0.
+**Version:** 2.4.0.
 
 ### Semantic versioning is mandatory
 
@@ -86,7 +86,10 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #   list_all_debit_txns            - List all account debit transactions
 #   monthly_debit_spending_summary - Month-wise debit spending by currency
 #
-# All five of those accept:
+# Across BOTH stores at once:
+#   monthly_vendor_chart           - Stacked monthly bars, CC + debit together
+#
+# All six of those accept:
 #   --from-date YYYY-MM-DD         - only txns on or after this date (inclusive)
 #   --to-date   YYYY-MM-DD         - only txns on or before this date (inclusive)
 #
@@ -99,12 +102,21 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 # list_all_debit_txns also accepts:
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
 #
-# ALL SIX accept the vendor pair:
+# ALL SEVEN accept the vendor pair:
 #   --vendor TEXT                  - case-insensitive substring, matched against
 #                                    the vendor as sent AND its canonical name
 #   --canonical-vendors            - report vendors under their canonical names
 #
 # Both monthly summary commands and cc_spend_for_month accept --verbose / -v.
+#
+# monthly_vendor_chart also accepts:
+#   --group-by {vendor|bank|txn-type|none}   - what each bar is split into;
+#                                              default vendor
+#
+# When list_all_cc_txns or list_all_debit_txns is given a date range and/or
+# --vendor, its table output also carries an "Aggregate spend" block: one
+# exact total per currency for the matching txns. Currencies are never added
+# together, and the JSON/CSV row shapes are unchanged -- they are a contract.
 #
 # GLOBAL options must be written BEFORE the filepath, because a Click group
 # stops parsing its own options at the first positional argument:
@@ -116,6 +128,16 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #   --no-color
 ```
 
+`monthly_vendor_chart` is the only command that reads **both** stores: it matches CC txns and
+Meezan debits together, because a merchant is a merchant and which store paid it is not something
+you should have to know before searching. It draws **every month between the first and the last,
+including the empty ones** — a chart that closes its gaps up lies about the shape of the series —
+and gives **each currency its own chart**, since one bar cannot mix PKR and USD. At most four
+series are named and the rest become `Other`; under `--format json` / `--format csv` it writes the
+series behind the chart (`month, series, currency, amount`) with **every** series named, because
+the four-series cap is a readability limit of a terminal bar and a consumer handed `Other` could
+never recover what was in it.
+
 ```bash
 uv run sms-txn backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024-12-31
 uv run sms-txn backup.xml list_all_cc_txns --bank FBL
@@ -123,6 +145,9 @@ uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
 uv run sms-txn --format csv backup.xml list_all_debit_txns --txn-type atm_withdrawal > atm.csv
 uv run sms-txn backup.xml list_all_cc_txns --vendor PSO
 uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-vendors
+uv run sms-txn backup.xml monthly_vendor_chart --vendor "KE 04000003" --from-date 2025-01-01
+uv run sms-txn backup.xml monthly_vendor_chart --group-by bank
+uv run sms-txn --format csv backup.xml monthly_vendor_chart --group-by txn-type
 ```
 
 `python -m sms_msgs_scraper` is equivalent to `sms-txn` and works from a source checkout.
@@ -238,6 +263,7 @@ sms_msgs_scraper/
 │       └── render/
 │           ├── console_ui.py     # the two consoles, the theme, cell helpers
 │           ├── tables.py         # Rich tables
+│           ├── charts.py         # stacked monthly bar charts
 │           └── machine.py        # JSON and CSV
 ├── scripts/
 │   └── verify_against_backup.py
@@ -252,6 +278,8 @@ sms_msgs_scraper/
     ├── test_sms_backup_file_parser.py
     ├── test_cli_commands.py / test_date_range_filter.py
     ├── test_vendors.py / test_vendor_filter.py
+    ├── test_filtered_spend_aggregate.py
+    ├── test_monthly_vendor_chart.py
     ├── test_adversarial_input.py / test_adversarial_cli.py
     ├── test_import_layering.py
     ├── test_synthetic_corpus.py
@@ -270,7 +298,7 @@ own copy of a small `_parseBackup` helper.
 ```
 app     sms_txn_query_tool.py (CLI)  ·  sms_backup_file_parser.py (orchestrator)
   ↓
-render  console_ui.py  ·  tables.py  ·  machine.py
+render  console_ui.py  ·  tables.py  ·  charts.py  ·  machine.py
   ↓
 parser  registry.py (BANK_SPECS)  ·  hbl / fbl / scb / mezn _sms_parser.py
   ↓
@@ -282,6 +310,7 @@ domain  money · types · tz · message · cc_txn · debit_txn · diagnostics ·
 sms_txn_query_tool.py (CLI, rich_click)
     ├── render/console_ui.py (consoles, theme, cell helpers)
     ├── render/tables.py     (Rich tables)
+    ├── render/charts.py     (stacked monthly bars)
     ├── render/machine.py    (JSON, CSV)
     ├── domain/aggregate.py  (exact totals over Money, the output order)
     ├── domain/vendors.py    (--vendor, --canonical-vendors, --vendor-map)
@@ -360,6 +389,29 @@ silent. A misspelled entry key, an alias two canonical names both claim, an entr
 none of those raise on their own, they just group less than the file appears to say. The longest
 matching prefix wins, so one entry can refine another; two canonical names claiming *the same*
 alias is refused outright, because that is a question the file does not answer.
+
+**`render/charts.py`** — the stacked monthly bar chart, and the only module that decides how many
+series a reader can be shown at once.
+
+The cap is four named series plus `Other`, and it is a *colour* limit rather than a layout
+preference. A terminal background may be near-black or near-white, so a series colour has to sit in
+the lightness band that works against both, and that band is narrow enough that a fifth
+well-separated hue does not fit in it. The four in `console_ui` were computed rather than chosen —
+worst protanope/deuteranope separation 14.6 in OKLab dE x100 against a target of 8, worst
+normal-vision separation 16.2 against a floor of 15, every pair, both surfaces. Cycling a colour
+back round for a fifth series would give two series one identity, which is worse than saying
+`Other`.
+
+**Colour is never the only encoding.** Each series also carries its own block glyph and a fixed
+position in the stack, and the totals table under each chart repeats the exact figures. That is
+what keeps a chart readable when it is piped to a file, rendered without colour, or read by a
+tritanope — the one colour-vision case the narrow band cannot solve.
+
+The series a chart names are selected **once, across every currency**, not per currency. Selecting
+per currency gave the same bank a solid block in the PKR chart and a shaded one in the USD chart
+directly beneath it. Selection is by amount when there is one currency and by how much of the chart
+a series occupies when there is more than one, because ranking series across currencies by amount
+would mean adding PKR to USD.
 
 **`domain/diagnostics.py`** — a parse failure is a *value*, not a `print()`. `ParseDiagnostic` has
 no field a msg body would fit in: it carries a `SkipReason` from a closed vocabulary plus a locator
@@ -484,6 +536,11 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
 3. **Prefer the narrowest alias that covers the family.** A broad prefix silently claims merchants
    that merely start with the same word, and mis-attributed spending looks exactly like real
    spending. `SHELL` is a prefix of a great many things that are not the fuel brand.
+   **A trailing space does not anchor a prefix on a word boundary.** `normalizeVendor` strips
+   leading and trailing whitespace before an alias is stored, so `"prefix": ["KE "]` is held as
+   `ke` and claims `KENTUCKY...` as readily as the electricity bill. The packaged example's note
+   asserted the opposite until 2.4.0. Anchor by extending the prefix into content that is actually
+   stable — the fixed opening digits of a consumer number, or the whole word.
 4. **Nothing derived from a real backup gets committed** — this repository is public. That covers
    third parties (Meezan's funds-transfer payees are largely individuals) and the account holder
    equally: a school, a hospital and a utility together locate a person. All of it belongs in the
@@ -609,6 +666,20 @@ record the derivation.** Never quietly edit this table to match observed output.
   a template change worth reporting rather than an amount worth trusting. It lands in `FBL_SKIPPED`.
 - **Meezan cheque-clearing debits are deliberately out of scope** — they risk double-counting
   against the separate "cheque received" notice.
+- **A chart shows at most four named series.** Everything past the fourth becomes `Other`, chosen
+  by amount within a single currency and by share of the chart across several. The exact figures
+  for every series are always in the machine formats, which never fold — so the cap costs a reader
+  of the terminal chart resolution, and costs a program nothing.
+
+- **A sub-cell segment disappears from a bar.** A series worth less than one cell at the chart's
+  scale rounds to zero width, so a PKR 2 charge next to a PKR 260 one has no visible segment. The
+  totals table under the chart still carries it, and the bar's *own* length is never rounded away:
+  a month with any spending in it is at least one cell.
+
+- **`monthly_vendor_chart` dates a transaction by when the bank sent the alert**, which for a bill
+  is when it was *paid*, not the period it covers. A December electricity bill paid on 2 January is
+  a January bar. The tool has no way to know a billing period — the messages do not carry one.
+
 - **`list_all_debit_vendors` does not exist.** `debitVendors` is populated and the command would be
   trivial; it was simply not asked for. `list_all_debit_txns --vendor X` covers the search case.
 

@@ -27,8 +27,10 @@ import rich_click as click
 from sms_msgs_scraper import __version__
 from sms_msgs_scraper.domain.aggregate import (
     MONTH_KEY_FMT,
+    countsByGroup,
     monthKeyFor,
     monthlyTotals,
+    seriesTotalsByMonth,
     txnCountsByMonth,
     txnSortKey,
 )
@@ -41,6 +43,7 @@ from sms_msgs_scraper.domain.vendors import (
 )
 from sms_msgs_scraper.parser.registry import REGISTRY
 from sms_msgs_scraper.render import machine
+from sms_msgs_scraper.render.charts import monthlyChart
 from sms_msgs_scraper.render.console_ui import (
     console,
     printEmptyState,
@@ -53,6 +56,7 @@ from sms_msgs_scraper.render.console_ui import (
     statusSpinner,
 )
 from sms_msgs_scraper.render.tables import (
+    aggregateSpendTable,
     bankSpendTable,
     ccTxnsTable,
     debitTxnsTable,
@@ -81,6 +85,18 @@ DATE_RANGE_FMT = "%Y-%m-%d"
 OUTPUT_FORMATS = ("table", "json", "csv")
 
 DEBIT_TXN_TYPES = tuple(txnType.value for txnType in DebitTxnType)
+
+# What a bar in monthly_vendor_chart may be split by.
+GROUP_BY_CHOICES = ("vendor", "bank", "txn-type", "none")
+
+# The series name a credit card transaction takes under --group-by txn-type.
+# A CC purchase carries no DebitTxnType, and it is not an absence: it is its
+# own kind of transaction, and the chart is the one place both stores meet.
+CC_SERIES = "credit_card"
+
+# The single series --group-by none draws. Named rather than blank so the
+# totals table under the chart still has something to put in its first column.
+ALL_SERIES = "All transactions"
 
 
 # --- how rich_click renders --help and usage errors -------------------------
@@ -116,6 +132,12 @@ click.rich_click.COMMAND_GROUPS = {
             "commands": [
                 "list_all_debit_txns",
                 "monthly_debit_spending_summary",
+            ],
+        },
+        {
+            "name": "Across both (credit card + account debit)",
+            "commands": [
+                "monthly_vendor_chart",
             ],
         },
     ]
@@ -568,7 +590,26 @@ def _filterLabel(
     return f" ({', '.join(parts)})" if parts else ""
 
 
-def _emit(ctx, kind, columns, rows, table, emptyMessage, notice) -> None:
+def _spendAggregate(txns, fromDate, toDate, vendor):
+    """The aggregate-spend table a filtered listing carries, or None.
+
+    Only a search -- a date range, a vendor needle, or both -- earns one: the
+    person filtering is asking "how much was that?", and making them sum a
+    column by eye is the gap this closes. An unfiltered listing keeps its
+    output exactly as it was, and totals over everything remain the summary
+    commands' job.
+
+    Table output only. The JSON and CSV row shapes are a contract a consumer
+    may be parsing, and a totals row smuggled into them is precisely the kind
+    of row that corrupts a naive reader.
+    """
+    if fromDate is None and toDate is None and vendor is None:
+        return None
+
+    return lambda: aggregateSpendTable(txns)
+
+
+def _emit(ctx, kind, columns, rows, table, emptyMessage, notice, aggregate=None) -> None:
     """Write one command's results out in the requested format.
 
     The empty case is handled differently on purpose. For a person, a table
@@ -590,6 +631,9 @@ def _emit(ctx, kind, columns, rows, table, emptyMessage, notice) -> None:
 
     printNotice(notice.line)
     console.print(table())
+
+    if aggregate is not None:
+        console.print(aggregate())
 
 
 def _writeMachineOutput(app, kind, columns, rows) -> None:
@@ -674,6 +718,7 @@ def list_all_cc_txns(ctx, from_date, to_date, bank, vendor, canonical_vendors):
         rows=machine.ccTxnRows(txns),
         table=lambda: ccTxnsTable(txns),
         emptyMessage="No credit card transactions match this filter.",
+        aggregate=_spendAggregate(txns, from_date, to_date, vendor),
         notice=_Notice(
             "Credit card transactions",
             f"Found {len(txns):,} CC transactions"
@@ -805,6 +850,7 @@ def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_
         rows=machine.debitTxnRows(txns),
         table=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES),
         emptyMessage="No account debit transactions match this filter.",
+        aggregate=_spendAggregate(txns, from_date, to_date, vendor),
         notice=_Notice(
             "Account debit transactions",
             f"Found {len(txns):,} debit transactions"
@@ -856,6 +902,116 @@ def monthly_debit_spending_summary(
         detailTable=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES),
         summaryTable=lambda: monthlySummaryTable(txns),
     )
+
+
+@cli.command("monthly_vendor_chart")
+@dateRangeOptions
+@vendorOptions
+@click.option(
+    "--group-by",
+    type=click.Choice(GROUP_BY_CHOICES),
+    default="vendor",
+    show_default=True,
+    help="What each bar is split into: [bold]vendor[/] the distinct vendor "
+    "strings, [bold]bank[/] the issuing or debiting bank, [bold]txn-type[/] "
+    "the kind of transaction, [bold]none[/] one solid bar per month.",
+)
+@click.pass_context
+def monthly_vendor_chart(ctx, from_date, to_date, vendor, canonical_vendors, group_by):
+    """Chart spending month by month as stacked bars, split by vendor.
+
+    The only command that reads [bold]both[/] stores at once: it matches credit
+    card transactions and Meezan account debits together, because a merchant is
+    a merchant and which of the two a bill was paid from is not something you
+    should have to know before you can search for it.
+
+    Every month between the first and the last is drawn, [bold]including the
+    ones with nothing in them[/] -- a chart that closes its gaps up is a chart
+    that lies about the shape of the series. Each currency gets its own chart:
+    one bar cannot mix PKR and USD without an exchange rate.
+
+    With [bold]--format json[/] or [bold]--format csv[/] this writes the series
+    behind the chart -- month, series, currency, amount -- with every series
+    named rather than folded into "Other".
+    """
+    report = ctx.obj.report()
+    txns = sorted(report.ccTxns + report.debitTxns, key=txnSortKey)
+    txns = _filterTxnsByDateRange(txns, from_date, to_date)
+    txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
+
+    seriesFor, orderedNames, seriesHeader = _seriesGrouping(group_by, txns)
+    perMonth = seriesTotalsByMonth(txns, seriesFor)
+
+    app = ctx.obj
+
+    if app.machineReadable:
+        _writeMachineOutput(
+            app, "monthly_chart", machine.CHART_COLUMNS, machine.chartRows(perMonth)
+        )
+        return
+
+    printRule("Monthly spending chart")
+
+    if not txns:
+        printEmptyState("No transactions match this filter.")
+        return
+
+    printNotice(
+        f"Charting {len(txns):,} transactions by {group_by}"
+        f"{_filterLabel(
+            from_date,
+            to_date,
+            vendor=vendor,
+            canonicalVendors=canonical_vendors,
+        )}:"
+    )
+
+    counts = countsByGroup(txns, lambda txn: (seriesFor(txn), txn.money.currency))
+    console.print(monthlyChart(perMonth, orderedNames, counts, seriesHeader))
+
+
+def _seriesGrouping(groupBy, txns):
+    """The series function, the stable series order, and the column header.
+
+    The order is what the chart assigns colours and glyphs from, so it must
+    depend only on *which* series exist and never on how large they are --
+    otherwise narrowing a date range repaints the survivors and two runs stop
+    being comparable by eye.
+
+    Bank and transaction type keep the colours they wear in every table in this
+    tool, which is why they are ordered by the registry and by the enum rather
+    than alphabetically: those orders are the ones the rest of the output uses.
+    Vendors have no identity of their own to colour by, so they take the four
+    computed series colours in alphabetical order -- stable under any filter
+    that does not change the set of vendors.
+    """
+    if groupBy == "none":
+        return (lambda txn: ALL_SERIES), [ALL_SERIES], "Series"
+
+    if groupBy == "bank":
+        present = {txn.bank for txn in txns}
+        ordered = [bankId for bankId in REGISTRY.bankIds if bankId in present]
+        ordered.extend(sorted(present.difference(REGISTRY.bankIds)))
+
+        return (lambda txn: txn.bank), ordered, "Bank"
+
+    if groupBy == "txn-type":
+        # A credit card transaction has no txnType field: a CC purchase is its
+        # own kind, and naming it here is what lets the two stores be charted
+        # on one axis at all.
+        def seriesFor(txn):
+            return str(getattr(txn, "txnType", CC_SERIES))
+
+        present = {seriesFor(txn) for txn in txns}
+        ordered = [
+            name
+            for name in (CC_SERIES, *DEBIT_TXN_TYPES)
+            if name in present
+        ]
+
+        return seriesFor, ordered, "Type"
+
+    return (lambda txn: txn.vendor), sorted({txn.vendor for txn in txns}), "Vendor"
 
 
 def _emitMonthly(

@@ -99,6 +99,41 @@ def monthlyRows(perMonth, perMonthCounts) -> list:
 MONTHLY_COLUMNS = ("month", "currency", "total", "txns")
 
 
+def chartRows(perMonth) -> list:
+    """One row per month per series per currency -- the numbers a chart draws.
+
+    Long form, and deliberately the *unfolded* series rather than what the
+    chart shows: the terminal chart names at most four series and collects the
+    rest under "Other", which is a readability limit of a bar 56 cells wide and
+    has no business narrowing what a program is given. A consumer that wants
+    the top four can rank four rows itself; one that was handed "Other" could
+    never get back what was in it.
+
+    Months with no transactions carry no rows. A gap has to be drawn in a
+    chart, but emitting a zero row here would assert a zero total where what is
+    true is that nothing was spent -- the same distinction `totalsByGroup`
+    keeps by not seeding currencies.
+    """
+    rows = []
+
+    for monthKey in sorted(perMonth):
+        for series in sorted(perMonth[monthKey]):
+            for currency in sorted(perMonth[monthKey][series]):
+                rows.append(
+                    {
+                        "month": monthKey,
+                        "series": series,
+                        "currency": currency,
+                        "amount": str(perMonth[monthKey][series][currency].amount),
+                    }
+                )
+
+    return rows
+
+
+CHART_COLUMNS = ("month", "series", "currency", "amount")
+
+
 def toJson(payloadKind: str, rows: list, meta: dict | None = None) -> str:
     """Serialise rows as a schema-versioned JSON document."""
     document = {

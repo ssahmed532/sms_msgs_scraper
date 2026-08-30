@@ -7,8 +7,8 @@
       "exact": ["EXAMPLE FUEL DEPOT"]
     },
     "EXAMPLE UTILITY": {
-      "note": "EXAMPLE ENTRY, matching nothing real. Shows why the prefix form is not a convenience: a utility bill embeds its own consumer number and the suffix says how it was paid, so the full strings cannot be enumerated exactly. The trailing space keeps the alias on a word boundary.",
-      "prefix": ["EXAMPLE UTILITY "]
+      "note": "EXAMPLE ENTRY, matching nothing real. Shows why the prefix form is not a convenience: a utility bill embeds its own consumer number and the suffix says how it was paid, so the full strings cannot be enumerated exactly. NOTE that an alias is normalized before it is stored, and normalization strips leading and trailing whitespace -- so a trailing space does NOT anchor a prefix on a word boundary, and this one also claims EXAMPLE UTILITYVILLE. Anchor by extending the prefix into content that is actually stable, such as the fixed opening digits of the consumer number.",
+      "prefix": ["EXAMPLE UTILITY"]
     },
     "EXAMPLE STORE": {
       "note": "EXAMPLE ENTRY, matching nothing real. Shows the exact form, for a merchant whose spellings share no common opening: word order differs between the two, so no prefix could cover both.",

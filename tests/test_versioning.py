@@ -108,8 +108,8 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_minor_one_over_the_2_1_1_interface(self):
-        """2.2.0, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_minor_one_over_the_2_3_0_interface(self):
+        """2.4.0, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -122,18 +122,29 @@ class TestReleaseShape(unittest.TestCase):
         to and the bank registry split, with no command, option, default or
         output stream changed.
 
-        2.2.0 adds vendor search (`--vendor`), canonical vendor names
-        (`--canonical-vendors`) and the table behind them (`--vendor-map`). It
-        is MINOR rather than MAJOR precisely because canonicalization is opt-in:
-        a run that does not ask for it sees the same vendor strings, the same
-        row counts and the same totals it saw in 2.1.1, and the reference corpus
-        reproduces every number in CLAUDE.md unchanged. Making it the default
-        would have been the MAJOR: `list_all_vendors` would return 271 rows
-        where it used to return 359, and every script counting them would break.
+        2.2.0 was MINOR: vendor search (`--vendor`), canonical vendor names
+        (`--canonical-vendors`) and the table behind them (`--vendor-map`),
+        all opt-in.
+
+        2.3.0 adds the aggregate-spend table under a *filtered* listing: when
+        `list_all_cc_txns` or `list_all_debit_txns` is given a date range or a
+        vendor needle, the table output also carries one exact total per
+        currency for the matching transactions. MINOR rather than MAJOR because
+        no existing invocation changes meaning: an unfiltered listing renders
+        exactly what 2.2.0 rendered, no filter changes which rows come back,
+        and the JSON and CSV row shapes -- the outputs a script would parse --
+        are untouched in every case.
+
+        2.4.0 adds `monthly_vendor_chart` and its `--group-by` option: stacked
+        monthly bars over credit card transactions and account debits together.
+        MINOR because it is purely additive -- a new command, reachable only by
+        naming it. Every existing command, option, default and output stream is
+        exactly what 2.3.0 shipped, and the new command's own JSON and CSV rows
+        are a new shape rather than a changed one.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "2", "0"))
+        self.assertEqual((major, minor, patch), ("2", "4", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

@@ -9,6 +9,7 @@ from sms_msgs_scraper.domain.aggregate import (
     countsByAttribute,
     grandTotals,
     monthlyTotals,
+    totalsByCurrency,
     totalsByGroup,
     txnCountsByMonth,
 )
@@ -184,6 +185,37 @@ def _groupedTotalsTable(groupHeader, orderedKeys, perGroup, perGroupCounts, grou
             for currency in currencies
         )
         table.add_row(*row)
+
+    return table
+
+
+def aggregateSpendTable(txns):
+    """What a filtered listing adds up to: one row per currency, each carrying
+    that currency's transaction count and exact total.
+
+    One row per currency rather than one row with a currency per column,
+    because there is no TOTAL to put under such columns -- currencies are never
+    added together, so a listing that spans three currencies has three answers,
+    not one.
+    """
+    totals = totalsByCurrency(txns)
+
+    counts: dict[str, int] = {}
+    for txn in txns:
+        currency = txn.money.currency
+        counts[currency] = counts.get(currency, 0) + 1
+
+    table = summaryTable("Aggregate spend")
+    table.add_column("Cur")
+    table.add_column("Txns", justify="right")
+    table.add_column("Total", justify="right")
+
+    for currency in _currencyColumns(totals):
+        table.add_row(
+            currencyText(currency),
+            countText(counts[currency]),
+            amountText(totals[currency]),
+        )
 
     return table
 
