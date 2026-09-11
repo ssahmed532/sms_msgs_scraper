@@ -7,8 +7,10 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.5.0**, which adds `backup_info` — what the backup file itself is: its size, its
-SHA-256, what it declares it holds against what was found in it, and where its messages went. See
+**Version 2.5.1**, a patch: the chart's axis ticks, change marker and bar apportionment corrected,
+the senders footer relabelled, and an alias table can no longer claim one string under two names.
+2.5.0 added `backup_info` — what the backup file itself is: its size, its SHA-256, what it declares
+it holds against what was found in it, and where its messages went. See
 [what changed](#whats-new-in-200) if you are coming from 1.x — three things behave differently for
 an existing caller.
 
@@ -142,7 +144,7 @@ series named: the four-series cap is a readability limit of a terminal bar, and 
 
 ### Command options
 
-All commands except `cc_spend_for_month` accept an inclusive date range:
+All commands except `cc_spend_for_month` and `backup_info` accept an inclusive date range:
 
 - `--from-date YYYY-MM-DD` — only transactions on or after this date
 - `--to-date YYYY-MM-DD` — only transactions on or before this date
@@ -533,6 +535,26 @@ nothing anywhere by design.
 **Canonicalization never changes an amount, a transaction count or a total** — it only changes what
 the output calls things, and `tests/test_vendor_filter.py` pins that. It is also opt-in: without
 `--canonical-vendors`, every command reports the strings the banks sent.
+
+## What's new in 2.5.1
+
+A patch release: fixes, no new capability, and no existing invocation changes meaning.
+
+- **Chart axis ticks were wrong at small scales.** A tick of 1,500 was labelled `2k`, so a chart
+  whose largest month was 2,000 read `0  500  1k  2k  2k`. Ticks under 10k now keep one decimal:
+  `0  500  1k  1.5k  2k`.
+- **A month equal to the one before showed `▼ 0.0%`.** It now shows `= 0.0%`: no change is
+  neither a rise nor a fall.
+- **A stacked bar could run one cell past its own total.** With four or five segments, rounding
+  each one could push the sum a cell over the width the total says. Segments are now apportioned
+  by largest remainder, so they sum to the bar's length exactly.
+- **The senders table's footer said `ALL` and meant `ALL - DUP`.** A suppressed duplicate is
+  attributed to no sender, so the footer is smaller than the `Messages` count above it; it is
+  labelled as what it is.
+- **An alias table could hold one string as an `exact` alias under one canonical name and as a
+  `prefix` under another.** That is the same unanswered question the loader already refuses for
+  two `exact` or two `prefix` claims, and it is refused the same way now.
+- `backup_info` reports the backup's resolved folder rather than `.` for a relative path.
 
 ## What's new in 2.5.0
 

@@ -422,8 +422,13 @@ def _sendersTable(report):
         showFooter=True,
         caption="refines the bank counts exactly",
     )
+    # The footer is every message attributed to a sender, and a suppressed
+    # duplicate is attributed to none -- it was dropped before routing. Labelled
+    # as ALL - DUP rather than ALL because the Messages table two tables up
+    # prints ALL, and a reader comparing the two was being shown a smaller
+    # number under the same word with nothing to explain the gap.
     table.add_column(
-        "Sender", footer=labelText("ALL", style="column.total"), min_width=14
+        "Sender", footer=labelText("ALL - DUP", style="column.total"), min_width=14
     )
     table.add_column("Bank", min_width=8)
     table.add_column(

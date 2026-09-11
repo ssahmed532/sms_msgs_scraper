@@ -19,6 +19,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -173,11 +174,28 @@ class TestFileMetadata(BackupInfoTestCase):
         )
         self.assertTrue(sizeRow["note"])
 
-    def test_the_modified_time_is_stamped_asia_karachi(self):
+    def test_the_modified_time_is_converted_into_asia_karachi(self):
+        """Converted, not stamped: `st_mtime` is an absolute instant, unlike
+        the naive wall-clock dates parsed out of a message body."""
         info = BackupFileInfo.forPath(self._standardBackup())
 
         self.assertIsNotNone(info.modifiedAt.tzinfo)
         self.assertEqual(str(info.modifiedAt.tzinfo), "Asia/Karachi")
+
+    def test_a_relative_path_reports_its_resolved_folder(self):
+        """The folder used to come out as `.`, which identifies nothing once
+        the output has left the shell it was produced in."""
+        backupPath = self._standardBackup()
+        previous = Path.cwd()
+        os.chdir(backupPath.parent)
+        self.addCleanup(os.chdir, previous)
+
+        rows = self.rowsFrom(Path(backupPath.name))
+
+        self.assertEqual(self.valueOf(rows, "file", "name"), backupPath.name)
+        self.assertEqual(
+            self.valueOf(rows, "file", "folder"), str(backupPath.parent.resolve())
+        )
 
     def test_a_count_reaches_a_program_as_a_number_not_a_grouped_string(self):
         rows = self.rowsFrom(self._standardBackup())
@@ -312,6 +330,24 @@ class TestVerboseStats(BackupInfoTestCase):
         # declared, and silent in this backup
         self.assertEqual(senders["9220"], 0)
         self.assertEqual(senders["9779"], 0)
+
+    def test_the_senders_footer_is_labelled_as_what_it_counts(self):
+        """Its value is every message attributed to a sender, and a suppressed
+        duplicate is attributed to none -- so it is ALL minus DUP, and it used
+        to be labelled `ALL` while the Messages table above it printed a larger
+        number under the same word."""
+        backupPath = self._standardBackup()
+        report = SmsBackupFileParser().parse(backupPath)
+
+        result = self.run_cli(["--quiet", str(backupPath), "backup_info", "--verbose"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        footer = next(
+            line for line in result.stdout.splitlines() if "ALL - DUP" in line
+        )
+        expected = report.count("ALL") - report.count("DUP")
+        self.assertIn(f" {expected} ", footer)
+        self.assertNotEqual(expected, report.count("ALL"))
 
     def test_parse_failures_are_broken_down_by_bank_and_reason(self):
         rows = self.rowsFrom(self._standardBackup(), extra=["--verbose"])

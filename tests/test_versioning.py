@@ -108,8 +108,8 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_minor_one_over_the_2_4_0_interface(self):
-        """2.5.0, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_patch_over_the_2_5_0_interface(self):
+        """2.5.1, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -154,10 +154,21 @@ class TestReleaseShape(unittest.TestCase):
         counts, and its schema version went 1 -> 2. That is not part of the
         release number: no command reads or writes a serialised report, so no
         caller of this tool can observe it.
+
+        2.5.1 is a PATCH: five corrections and no new capability. Chart axis
+        ticks under 10k keep a decimal so 1,500 is no longer labelled `2k`; a
+        month equal to the one before shows `=` rather than `▼`; stacked bar
+        segments are apportioned by largest remainder so they sum to the bar's
+        length; the senders footer is labelled `ALL - DUP`, which is what it
+        always was; and `backup_info` prints a resolved folder. The alias
+        loader also now refuses one string held as an `exact` alias under one
+        canonical name and as a `prefix` under another -- a narrowing of what
+        a map file may say, but of a shape the loader's own documentation
+        already promised to refuse, and one no table was relying on.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "5", "0"))
+        self.assertEqual((major, minor, patch), ("2", "5", "1"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

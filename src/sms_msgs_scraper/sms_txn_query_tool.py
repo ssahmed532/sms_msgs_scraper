@@ -1062,7 +1062,10 @@ def backup_info(ctx, verbose):
     # and it should fail as that rather than as a digest that could not be
     # computed.
     report = app.report()
-    fileInfo = BackupFileInfo.forPath(app.filepath)
+    # Resolved, so the folder printed is a folder: a backup named relative to
+    # the working directory reported its folder as ".", which identifies
+    # nothing once the output has left the shell it was run in.
+    fileInfo = BackupFileInfo.forPath(app.filepath.resolve())
 
     if app.machineReadable:
         _writeMachineOutput(

@@ -230,6 +230,30 @@ class TestLoaderRejectsAmbiguity(unittest.TestCase):
 
         self.assertIn("claimed by both", str(caught.exception))
 
+    def test_one_string_held_as_exact_by_one_name_and_as_prefix_by_another_is_refused(self):
+        """The same question in two forms. `_claim` checks each form in its own
+        table, so this used to load, and the exact form silently won for the
+        one vendor both names described."""
+        with self.assertRaises(VendorMapError) as caught:
+            aliasMap(
+                {
+                    "PSO": {"exact": ["PSO SERVICE STATION"]},
+                    "FUEL": {"prefix": ["pso  service station"]},
+                }
+            )
+
+        self.assertIn("exact alias", str(caught.exception))
+        self.assertIn("prefix", str(caught.exception))
+
+    def test_one_name_may_hold_a_string_as_both_exact_and_prefix(self):
+        """Redundant rather than ambiguous: both forms answer the same way."""
+        aliases = aliasMap(
+            {"PSO": {"exact": ["PSO SERVICE STATION"], "prefix": ["PSO SERVICE STATION"]}}
+        )
+
+        self.assertEqual(aliases.canonicalFor("PSO SERVICE STATION"), "PSO")
+        self.assertEqual(aliases.canonicalFor("PSO SERVICE STATION 7"), "PSO")
+
     def test_two_canonical_names_differing_only_in_case_are_refused(self):
         """A lookup folds case, so these two could never be told apart."""
         with self.assertRaises(VendorMapError) as caught:

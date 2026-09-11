@@ -188,6 +188,20 @@ class VendorAliasMap:
             _readEntry(canonical, entry, exact, prefixes)
             canonicalNames.append(canonical)
 
+        # `_claim` refuses two names on one exact alias and two names on one
+        # prefix, but each in its own table -- so one name could hold a string
+        # as an exact alias while another held the very same string as a
+        # prefix, and the exact form silently won for that vendor. That is the
+        # same unanswered question in a different shape, and it is refused the
+        # same way.
+        for alias, canonical in exact.items():
+            prefixCanonical = prefixes.get(alias)
+            if prefixCanonical is not None and prefixCanonical != canonical:
+                raise VendorMapError(
+                    f"the alias {alias!r} is claimed as an exact alias by "
+                    f"{canonical!r} and as a prefix by {prefixCanonical!r}"
+                )
+
         return cls(
             exactAliases=MappingProxyType(dict(exact)),
             # Longest first, so a more specific alias beats a broader one. Ties

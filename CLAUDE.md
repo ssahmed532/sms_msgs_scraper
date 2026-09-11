@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.5.0.
+**Version:** 2.5.1.
 
 ### Semantic versioning is mandatory
 
@@ -708,10 +708,12 @@ record the derivation.** Never quietly edit this table to match observed output.
   for every series are always in the machine formats, which never fold — so the cap costs a reader
   of the terminal chart resolution, and costs a program nothing.
 
-- **A sub-cell segment disappears from a bar.** A series worth less than one cell at the chart's
-  scale rounds to zero width, so a PKR 2 charge next to a PKR 260 one has no visible segment. The
-  totals table under the chart still carries it, and the bar's *own* length is never rounded away:
-  a month with any spending in it is at least one cell.
+- **A sub-cell segment usually disappears from a bar.** A series worth less than one cell at the
+  chart's scale generally gets no width, so a PKR 2 charge next to a PKR 260 one has no visible
+  segment. Segments are apportioned by largest remainder, so they always sum to exactly the bar's
+  own length — which means a sub-cell segment *can* win the last cell when its fraction is the
+  largest left over. The totals table under the chart carries every series regardless, and a
+  month with any spending in it is at least one cell.
 
 - **`monthly_vendor_chart` dates a transaction by when the bank sent the alert**, which for a bill
   is when it was *paid*, not the period it covers. A December electricity bill paid on 2 January is

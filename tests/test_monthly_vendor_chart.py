@@ -35,6 +35,7 @@ from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.render.charts import (
     MAX_NAMED_SERIES,
     OTHER_SERIES,
+    _compactAmount,
     foldSeries,
     segmentWidths,
     selectSeries,
@@ -170,6 +171,77 @@ class TestSegmentWidths(unittest.TestCase):
     def test_an_empty_bar_has_no_cells(self):
         self.assertEqual(segmentWidths([Decimal(0), Decimal(0)], Decimal("100"), 40),
                          [0, 0])
+
+    def test_three_equal_segments_and_a_small_one_do_not_overflow(self):
+        """The case the old rounding got wrong: 30/30/30/10 of a 5-cell bar
+        rounded each 1.5 up to 2, used six cells, and clamped the last segment
+        at zero -- a bar one cell longer than the axis it sat on."""
+        amounts = [Decimal(30), Decimal(30), Decimal(30), Decimal(10)]
+
+        widths = segmentWidths(amounts, Decimal(100), 5)
+
+        self.assertEqual(sum(widths), 5)
+
+    def test_the_segments_always_sum_to_the_bar_length(self):
+        """Largest-remainder apportionment is exact by construction, so this
+        holds for every mix of up to five segments at every bar width."""
+        import random
+
+        rng = random.Random(20250911)
+        for _ in range(2000):
+            amounts = [
+                Decimal(rng.randint(1, 5000)) for _ in range(rng.choice((2, 3, 4, 5)))
+            ]
+            barWidth = rng.choice((20, 32, 40, 56))
+            total = sum(amounts, Decimal(0))
+            # the largest month, so the bar should fill the width exactly
+            self.assertEqual(sum(segmentWidths(amounts, total, barWidth)), barWidth)
+            # and a smaller month, whose bar is shorter than the width
+            self.assertEqual(
+                sum(segmentWidths(amounts, total * 3, barWidth)),
+                round(barWidth / 3),
+            )
+
+    def test_no_segment_is_ever_negative(self):
+        widths = segmentWidths(
+            [Decimal(1), Decimal(1), Decimal(1), Decimal(1), Decimal(1)],
+            Decimal(5),
+            1,
+        )
+
+        self.assertEqual(sum(widths), 1)
+        self.assertTrue(all(width >= 0 for width in widths))
+
+
+class TestAxisTickLabels(unittest.TestCase):
+    def test_a_tick_under_ten_thousand_keeps_one_decimal(self):
+        """1,500 was labelled `2k`, which put the same label under two ticks:
+        a 2,000-scale axis read `0  500  1k  2k  2k`."""
+        self.assertEqual(_compactAmount(Decimal(1500)), "1.5k")
+        self.assertEqual(_compactAmount(Decimal(2250)), "2.2k")
+
+    def test_a_whole_thousand_drops_the_decimal(self):
+        self.assertEqual(_compactAmount(Decimal(2000)), "2k")
+        self.assertEqual(_compactAmount(Decimal(1_000_000)), "1M")
+
+    def test_larger_ticks_are_whole_units(self):
+        self.assertEqual(_compactAmount(Decimal(12_000)), "12k")
+        self.assertEqual(_compactAmount(Decimal(375_000)), "375k")
+        self.assertEqual(_compactAmount(Decimal(1_500_000)), "1.5M")
+        self.assertEqual(_compactAmount(Decimal(12_500_000)), "12M")
+
+    def test_under_a_thousand_is_the_number_itself(self):
+        self.assertEqual(_compactAmount(Decimal(0)), "0")
+        self.assertEqual(_compactAmount(Decimal(750)), "750")
+
+    def test_the_five_ticks_of_a_small_axis_are_all_distinct(self):
+        for scale in (2000, 3000, 4000, 6000):
+            with self.subTest(scale=scale):
+                labels = [
+                    _compactAmount(Decimal(scale) * Decimal(fraction))
+                    for fraction in ("0", "0.25", "0.5", "0.75", "1")
+                ]
+                self.assertEqual(len(set(labels)), 5, labels)
 
 
 class TestSeriesSelection(unittest.TestCase):
@@ -341,6 +413,45 @@ class TestTheChartCommand(ChartCliTestCase):
             line for line in result.stdout.splitlines() if "Mar 2025" in line
         )
         self.assertNotIn("%", marchRow)
+
+    def test_the_change_column_distinguishes_a_rise_a_fall_and_no_change(self):
+        """Three states. A month equal to the one before used to show `▼ 0.0%`,
+        which said it had fallen."""
+        backup = self._backup(
+            [
+                self._sms("4250", hblBody("PSO", "1,000.00", "10/Jan/2025")),
+                self._sms("4250", hblBody("PSO", "2,000.00", "10/Feb/2025")),
+                self._sms("4250", hblBody("PSO", "2,000.00", "10/Mar/2025")),
+                self._sms("4250", hblBody("PSO", "500.00", "10/Apr/2025")),
+            ]
+        )
+
+        result = self.run_cli([str(backup), "monthly_vendor_chart"])
+
+        self.assertEqual(result.exit_code, 0)
+        rows = {
+            label: next(line for line in result.stdout.splitlines() if label in line)
+            for label in ("Jan 2025", "Feb 2025", "Mar 2025", "Apr 2025")
+        }
+        self.assertNotIn("%", rows["Jan 2025"])
+        self.assertIn("▲ 100.0%", rows["Feb 2025"])
+        self.assertIn("=   0.0%", rows["Mar 2025"])
+        self.assertNotIn("▼", rows["Mar 2025"])
+        self.assertIn("▼  75.0%", rows["Apr 2025"])
+
+    def test_the_axis_of_a_small_chart_has_no_repeated_tick(self):
+        """A 2,000-scale axis read `0  500  1k  2k  2k`."""
+        backup = self._backup(
+            [self._sms("4250", hblBody("PSO", "2,000.00", "10/Jan/2025"))]
+        )
+
+        result = self.run_cli([str(backup), "monthly_vendor_chart"])
+
+        axis = next(
+            line for line in result.stdout.splitlines() if line.strip().startswith("0 ")
+        )
+        ticks = axis.split()
+        self.assertEqual(ticks, ["0", "500", "1k", "1.5k", "2k"])
 
     def test_currencies_are_charted_separately(self):
         result = self.run_cli(

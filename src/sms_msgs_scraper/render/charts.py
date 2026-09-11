@@ -226,14 +226,21 @@ def segmentWidths(amounts, scale: Decimal, barWidth: int) -> list[int]:
 
     totalCells = max(1, round(float(total) / float(scale) * barWidth))
 
-    cells = []
-    used = 0
-    for amount in amounts[:-1]:
-        count = round(float(amount) / float(total) * totalCells)
-        cells.append(count)
-        used += count
+    # Largest-remainder apportionment. Rounding the first segments and giving
+    # the last one whatever was left did not hold the sum: round-half-even can
+    # push three equal segments up together, and a last segment cannot absorb
+    # a negative remainder, so a five-segment bar came out a cell longer than
+    # its total says. Flooring every segment and then handing the leftover
+    # cells to the largest fractional parts is exact by construction.
+    exact = [float(amount) / float(total) * totalCells for amount in amounts]
+    cells = [int(share) for share in exact]
+    leftover = totalCells - sum(cells)
 
-    cells.append(max(0, totalCells - used))
+    byRemainder = sorted(
+        range(len(amounts)), key=lambda index: (cells[index] - exact[index], index)
+    )
+    for index in byRemainder[:leftover]:
+        cells[index] += 1
 
     return cells
 
@@ -250,13 +257,27 @@ def _monthLabel(monthKey: str) -> str:
 
 
 def _compactAmount(value: Decimal) -> str:
-    """An axis tick: short enough to sit under a bar without colliding."""
+    """An axis tick: short enough to sit under a bar without colliding.
+
+    One decimal is kept while the scaled value is still a single digit, and
+    dropped once it is not. Rounding `1.5k` to `2k` put the same label under
+    two different ticks -- a chart whose largest month was 2,000 read
+    `0  500  1k  2k  2k` -- and that is the scale a chart of one merchant
+    lands on.
+    """
     if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
+        return _scaledTick(value / 1_000_000, "M")
     if value >= 1_000:
-        return f"{value / 1000:,.0f}k"
+        return _scaledTick(value / 1_000, "k")
 
     return f"{value:,.0f}"
+
+
+def _scaledTick(scaled: Decimal, unit: str) -> str:
+    if scaled >= 10:
+        return f"{scaled:,.0f}{unit}"
+
+    return f"{scaled:.1f}".removesuffix(".0") + unit
 
 
 def _axisLine(scale: Decimal, barWidth: int):
@@ -344,10 +365,15 @@ def _chartRow(monthKey, amounts, names, scale, currency, barWidth, previous):
     # rather than quietly spanning the missing month.
     if previous is not None and previous > 0:
         change = (total - previous) / previous * 100
-        arrow = "▲" if change > 0 else "▼"
-        parts.append(
-            (f"  {arrow} {abs(change):5.1f}%", "warning" if change > 0 else "info")
-        )
+        # Three states, not two: a month equal to the one before is neither a
+        # rise nor a fall, and showing it as `▼ 0.0%` said it had fallen.
+        if change > 0:
+            arrow, style = "▲", "warning"
+        elif change < 0:
+            arrow, style = "▼", "info"
+        else:
+            arrow, style = "=", "muted"
+        parts.append((f"  {arrow} {abs(change):5.1f}%", style))
 
     return segmentsText(parts), total
 
