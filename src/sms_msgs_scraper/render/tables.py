@@ -5,6 +5,8 @@ usual reader; it has no privileged access to anything the JSON and CSV
 renderers cannot reach, and all three are handed the same objects.
 """
 
+from collections import Counter
+
 from sms_msgs_scraper.domain.aggregate import (
     countsByAttribute,
     grandTotals,
@@ -12,6 +14,7 @@ from sms_msgs_scraper.domain.aggregate import (
     totalsByCurrency,
     totalsByGroup,
     txnCountsByMonth,
+    txnDateSpan,
 )
 from sms_msgs_scraper.domain.bank import TxnKind
 from sms_msgs_scraper.domain.money import MINOR_UNITS
@@ -26,9 +29,11 @@ from sms_msgs_scraper.render.console_ui import (
     currencyText,
     dataTable,
     dateText,
+    humanBytes,
     indexText,
     labelText,
     printSideBySide,
+    sanitizeField,
     summaryTable,
     totalText,
     txnTypeText,
@@ -255,6 +260,277 @@ def bankSpendTable(txns):
         countsByAttribute(txns, "bank"),
         bankText,
     )
+
+
+def _fieldTable(title: str, rows, caption: str | None = None):
+    """The two-column Field/Value shape most of the backup metadata takes.
+
+    Values arrive already rendered as `Text`, because what a value *is* --
+    a count, a date, a bank, a digest -- decides how it is styled, and that is
+    the caller's knowledge rather than this helper's.
+    """
+    table = summaryTable(title, caption=caption)
+    # min_width so the caption below each table sits on one line. Rich wraps a
+    # caption to the table's own width, and a four-column-wide table with a
+    # forty-character caption under it is three lines of ragged text.
+    table.add_column("Field", style="muted", min_width=21)
+    table.add_column("Value", justify="right", overflow="fold", min_width=24)
+
+    for label, value in rows:
+        table.add_row(labelText(label, style="muted"), value)
+
+    return table
+
+
+def _fileTable(fileInfo):
+    """The file as the filesystem describes it, before it was read.
+
+    The name and the folder are sanitized for the same reason a vendor is: they
+    are strings from outside the program, and a path is perfectly capable of
+    carrying an escape sequence into a terminal.
+    """
+    return _fieldTable(
+        "File",
+        [
+            ("Name", labelText(sanitizeField(fileInfo.path.name))),
+            ("Folder", labelText(sanitizeField(str(fileInfo.path.parent)), style="muted")),
+            (
+                "Size",
+                labelText(
+                    f"{fileInfo.sizeBytes:,} bytes "
+                    f"({humanBytes(fileInfo.sizeBytes)})"
+                ),
+            ),
+            ("Modified", dateText(fileInfo.modifiedAt)),
+            ("SHA-256", labelText(fileInfo.sha256, style="muted")),
+        ],
+        caption="times are Asia/Karachi",
+    )
+
+
+def _envelopeTable(report):
+    """What the file said it held, against what was found in it."""
+    envelope = report.envelope
+    matches = envelope.matchesDeclared
+
+    return _fieldTable(
+        "Envelope",
+        [
+            ("Declared", countText(envelope.declared)),
+            (
+                "Found",
+                countText(
+                    envelope.actual,
+                    style="column.count" if matches else "warning",
+                ),
+            ),
+            ("<sms>", countText(envelope.sms)),
+            ("<mms>", countText(envelope.mms)),
+            (
+                "Invalid",
+                countText(
+                    envelope.invalid,
+                    style="bucket.skipped" if envelope.invalid else "column.empty",
+                ),
+            ),
+        ],
+        caption=(
+            "declared counts <mms> elements too"
+            if matches
+            else "MISMATCH: this file does not hold what it declares"
+        ),
+    )
+
+
+def _messagesTable(report):
+    """Where the file's messages went, in the same buckets the parse summary
+    uses -- on stdout this time, because here they are the answer rather than
+    the furniture around one.
+    """
+    total = report.count("ALL")
+    duplicates = report.count("DUP")
+    other = report.count("OTHER")
+
+    return _fieldTable(
+        "Messages",
+        [
+            ("Messages", countText(total)),
+            ("From a bank", countText(total - duplicates - other)),
+            ("From another sender", countText(other, style="bucket.other")),
+            (
+                "Duplicates suppressed",
+                countText(
+                    duplicates,
+                    style="bucket.dup" if duplicates else "column.empty",
+                ),
+            ),
+        ],
+        caption=f"duplicate policy: {report.duplicatePolicy}",
+    )
+
+
+def _transactionsTable(report):
+    """What was extracted, and the window the file actually covers.
+
+    The span is over transaction dates rather than message timestamps because a
+    transaction date is what the bank *said* -- parsed, validated and stamped
+    Asia/Karachi -- while a received timestamp is when the network got round to
+    delivering the alert, which this project has measured at up to 2.9 hours
+    later.
+    """
+    allTxns = list(report.ccTxns) + list(report.debitTxns)
+    first, last = txnDateSpan(allTxns)
+
+    def spanCell(moment):
+        return (
+            dateText(moment)
+            if moment is not None
+            else labelText(EMPTY_VALUE, style="column.empty")
+        )
+
+    return _fieldTable(
+        "Transactions",
+        [
+            ("Credit card", countText(len(report.ccTxns))),
+            ("Account debit", countText(len(report.debitTxns))),
+            ("CC vendors", countText(len(report.allVendors))),
+            ("Debit vendors", countText(len(report.debitVendors))),
+            ("First transaction", spanCell(first)),
+            ("Last transaction", spanCell(last)),
+            ("Months with txns", countText(len(txnCountsByMonth(allTxns)))),
+        ],
+        caption="dates are the bank's, not the alert's",
+    )
+
+
+def _sendersTable(report):
+    """One row per declared short code, and one for everyone else.
+
+    Every registered code gets a row even when it sent nothing, because a zero
+    here is a finding: it says a code this build routes has gone quiet, which is
+    what a bank re-homing its alerts looks like from the outside. HBL's move
+    from 4250 to 14250 in January 2025 is exactly this shape.
+
+    Unrecognized senders are counted, never named. They are personal phone
+    numbers, and a list of them is a contact list.
+    """
+    stats = report.messageStats
+    total = sum(stats.senderCounts.values()) + stats.unknownSenderMsgs
+
+    table = summaryTable(
+        "Senders",
+        showFooter=True,
+        caption="refines the bank counts exactly",
+    )
+    table.add_column(
+        "Sender", footer=labelText("ALL", style="column.total"), min_width=14
+    )
+    table.add_column("Bank", min_width=8)
+    table.add_column(
+        "Msgs",
+        justify="right",
+        footer=countText(total, style="column.total"),
+    )
+
+    for spec in REGISTRY:
+        for code in spec.senderCodes:
+            count = stats.senderCounts.get(code, 0)
+            table.add_row(
+                labelText(code, style="column.count" if count else "column.empty"),
+                bankText(spec.id),
+                countText(
+                    count, style="column.count" if count else "column.empty"
+                ),
+            )
+
+    table.add_section()
+    noun = "sender" if stats.unknownSenders == 1 else "senders"
+    table.add_row(
+        labelText(f"{stats.unknownSenders:,} {noun}", style="bucket.other"),
+        labelText("OTHER", style="bucket.other"),
+        countText(stats.unknownSenderMsgs, style="bucket.other"),
+    )
+
+    return table
+
+
+def _parseFailuresTable(report):
+    """Skips by bank and reason. "26 skipped" is a number; "21 truncated, 5
+    with no amount" is a diagnosis.
+    """
+    counts = Counter(
+        (diagnostic.bank, str(diagnostic.reason))
+        for diagnostic in report.diagnostics
+    )
+
+    table = summaryTable("Parse failures", showFooter=True)
+    table.add_column("Bank", footer=labelText("ALL", style="column.total"))
+    table.add_column("Reason")
+    table.add_column(
+        "Msgs",
+        justify="right",
+        footer=countText(sum(counts.values()), style="column.total"),
+    )
+
+    for (bank, reason), count in sorted(counts.items()):
+        table.add_row(
+            bankText(bank),
+            labelText(reason, style="bucket.skipped"),
+            countText(count),
+        )
+
+    return table
+
+
+def _duplicatesTable(report):
+    """What deduplication did, and how much of it was a judgement call."""
+    ambiguous = report.ambiguousDuplicates
+
+    return _fieldTable(
+        "Duplicates",
+        [
+            ("Policy", labelText(str(report.duplicatePolicy))),
+            ("Suppressed", countText(len(report.duplicates))),
+            (
+                "Ambiguous",
+                countText(
+                    ambiguous,
+                    style="bucket.dup" if ambiguous else "column.empty",
+                ),
+            ),
+        ],
+        caption="ambiguous: no time of day in the alert",
+    )
+
+
+def backupInfoTables(fileInfo, report, verbose: bool = False):
+    """Everything known about one backup file, as tables to print in order.
+
+    The peer of `machine.backupInfoRows`, and the two must describe the same
+    facts: a person reading the table and a script reading the JSON are asking
+    the same question of the same file, and an answer that differed between
+    them would be a defect in whichever one someone trusted.
+
+    `verbose` adds the breakdowns *within* those counts -- which short code,
+    which failure reason, which duplicates were a judgement call -- rather than
+    any new fact about the file.
+    """
+    tables = [
+        _fileTable(fileInfo),
+        _envelopeTable(report),
+        _messagesTable(report),
+        _transactionsTable(report),
+    ]
+
+    if verbose:
+        tables.append(_sendersTable(report))
+        # Only when there were any. An empty failures table reads as a table
+        # that failed to populate rather than as a clean run.
+        if report.diagnostics:
+            tables.append(_parseFailuresTable(report))
+        tables.append(_duplicatesTable(report))
+
+    return tables
 
 
 def parseSummaryTables(report):

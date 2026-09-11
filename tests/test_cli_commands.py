@@ -15,6 +15,7 @@ from click.testing import CliRunner
 
 from sms_msgs_scraper.sms_txn_query_tool import (
     EXIT_STRICT_FAILURE,
+    backup_info,
     cc_spend_for_month,
     cli,
     list_all_cc_txns,
@@ -109,6 +110,7 @@ class TestCommandRegistration(CliTestCase):
             "list_all_debit_txns": list_all_debit_txns,
             "monthly_debit_spending_summary": monthly_debit_spending_summary,
             "monthly_vendor_chart": monthly_vendor_chart,
+            "backup_info": backup_info,
         }
 
         self.assertEqual(set(cli.commands), set(expected))

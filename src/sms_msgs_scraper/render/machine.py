@@ -21,8 +21,11 @@ Two hardening rules apply to every field that came out of an SMS message:
 import csv
 import io
 import json
+from collections import Counter
 
-from sms_msgs_scraper.render.console_ui import sanitizeField
+from sms_msgs_scraper.domain.aggregate import txnCountsByMonth, txnDateSpan
+from sms_msgs_scraper.parser.registry import REGISTRY
+from sms_msgs_scraper.render.console_ui import humanBytes, sanitizeField
 
 # The shape of the machine-readable output. A consumer can pin this and be told
 # when it changes, rather than discovering it from a diff in their parser.
@@ -132,6 +135,121 @@ def chartRows(perMonth) -> list:
 
 
 CHART_COLUMNS = ("month", "series", "currency", "amount")
+
+
+def _infoRow(section: str, field: str, value, note: str = "") -> dict:
+    return {"section": section, "field": field, "value": value, "note": note}
+
+
+def backupInfoRows(fileInfo, report, verbose: bool = False) -> list:
+    """One row per fact about a backup file: which section it belongs to, what
+    it is called, what it is, and a short note where the bare value would
+    mislead.
+
+    The peer of `tables.backupInfoTables`, and deliberately the same facts in
+    the same order. A count is emitted as a number and never as a
+    thousands-grouped string: the grouping is a reading aid for a person, and a
+    consumer handed `"4,665"` has to undo it before it is a number again.
+    """
+    envelope = report.envelope
+    allTxns = list(report.ccTxns) + list(report.debitTxns)
+    first, last = txnDateSpan(allTxns)
+    total = report.count("ALL")
+    duplicates = report.count("DUP")
+    other = report.count("OTHER")
+
+    rows = [
+        _infoRow("file", "name", fileInfo.path.name),
+        _infoRow("file", "folder", str(fileInfo.path.parent)),
+        _infoRow(
+            "file", "sizeBytes", fileInfo.sizeBytes, humanBytes(fileInfo.sizeBytes)
+        ),
+        _infoRow("file", "modified", fileInfo.modifiedAt.isoformat()),
+        _infoRow("file", "sha256", fileInfo.sha256),
+        _infoRow("envelope", "declared", envelope.declared),
+        _infoRow(
+            "envelope",
+            "actual",
+            envelope.actual,
+            "" if envelope.matchesDeclared else "does not match declared",
+        ),
+        _infoRow("envelope", "sms", envelope.sms),
+        _infoRow("envelope", "mms", envelope.mms),
+        _infoRow("envelope", "invalid", envelope.invalid),
+        _infoRow("messages", "all", total),
+        _infoRow("messages", "fromBank", total - duplicates - other),
+        _infoRow("messages", "fromOtherSender", other),
+        _infoRow(
+            "messages",
+            "duplicatesSuppressed",
+            duplicates,
+            f"policy {report.duplicatePolicy}",
+        ),
+        _infoRow("transactions", "ccTxns", len(report.ccTxns)),
+        _infoRow("transactions", "debitTxns", len(report.debitTxns)),
+        _infoRow("transactions", "ccVendors", len(report.allVendors)),
+        _infoRow("transactions", "debitVendors", len(report.debitVendors)),
+        # An empty string rather than a fabricated date: a backup with no
+        # transactions in it has no first one, and any placeholder date would
+        # be a value a consumer could accidentally compare against.
+        _infoRow(
+            "transactions",
+            "firstTxnDate",
+            first.isoformat() if first is not None else "",
+        ),
+        _infoRow(
+            "transactions",
+            "lastTxnDate",
+            last.isoformat() if last is not None else "",
+        ),
+        _infoRow("transactions", "monthsWithTxns", len(txnCountsByMonth(allTxns))),
+    ]
+
+    if not verbose:
+        return rows
+
+    stats = report.messageStats
+
+    for spec in REGISTRY:
+        for code in spec.senderCodes:
+            rows.append(
+                _infoRow("senders", code, stats.senderCounts.get(code, 0), spec.id)
+            )
+
+    # Counted, never named -- an unrecognized sender is a personal phone
+    # number, and the report does not carry the strings to name them with.
+    noun = "sender" if stats.unknownSenders == 1 else "senders"
+    rows.append(
+        _infoRow(
+            "senders",
+            "unrecognized",
+            stats.unknownSenderMsgs,
+            f"{stats.unknownSenders} distinct {noun}",
+        )
+    )
+
+    failures = Counter(
+        (diagnostic.bank, str(diagnostic.reason))
+        for diagnostic in report.diagnostics
+    )
+    for (bank, reason), count in sorted(failures.items()):
+        rows.append(_infoRow("parseFailures", bank, count, reason))
+
+    rows.append(_infoRow("duplicates", "policy", str(report.duplicatePolicy)))
+    rows.append(_infoRow("duplicates", "suppressed", len(report.duplicates)))
+    rows.append(
+        _infoRow(
+            "duplicates",
+            "ambiguous",
+            report.ambiguousDuplicates,
+            "could not be proved to be retransmissions",
+        )
+    )
+
+    return rows
+
+
+INFO_COLUMNS = ("section", "field", "value", "note")
 
 
 def toJson(payloadKind: str, rows: list, meta: dict | None = None) -> str:

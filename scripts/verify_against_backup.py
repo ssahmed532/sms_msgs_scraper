@@ -263,6 +263,16 @@ def collectMetrics(report) -> dict:
     for spec in REGISTRY:
         metrics[spec.skippedBucket] = report.count(spec.skippedBucket)
 
+    metrics["unknown_senders"] = report.messageStats.unknownSenders
+
+    # Per-sender message counts. Deliberately *reported*, never expected: they
+    # are what a re-homed short code moves, and a number written down here
+    # would only ever be re-derived from whatever the code printed. The
+    # invariant below is what actually holds them honest.
+    for spec in REGISTRY:
+        for code in spec.senderCodes:
+            metrics[f"sender_{code}"] = report.messageStats.senderCounts.get(code, 0)
+
     metrics["ccTxns"] = len(report.ccTxns)
     metrics["vendors_cc_all"] = len(report.allVendors)
     metrics["debitTxns"] = len(report.debitTxns)
@@ -318,6 +328,33 @@ def checkInvariants(report, metrics: dict) -> list:
             f"conservation identity: ALL={metrics['ALL']} but "
             f"HBL+FBL+SCB+MEZN+OTHER+DUP={conserved} -- a routing branch is "
             f"counting twice or not at all"
+        )
+
+    # The sender breakdown refines the routing counts, so each bank's own
+    # short codes must sum back to its bucket and the unrecognised ones to
+    # OTHER. This is the check neither undeclared-sender bug had: a code that
+    # stops being claimed leaves a bank total that no longer describes the
+    # senders behind it, and nothing else in the run would say so.
+    stats = report.messageStats
+    for spec in REGISTRY:
+        counted = stats.countsFor(spec.senderCodes)
+        if counted != metrics[spec.id]:
+            failures.append(
+                f"sender breakdown for {spec.id}: bucket={metrics[spec.id]} but "
+                f"its short codes {', '.join(spec.senderCodes)} sum to {counted}"
+            )
+
+    if stats.unknownSenderMsgs != metrics["OTHER"]:
+        failures.append(
+            f"sender breakdown: OTHER={metrics['OTHER']} but "
+            f"{stats.unknownSenderMsgs} messages came from unregistered senders"
+        )
+
+    routed = sum(stats.senderCounts.values()) + stats.unknownSenderMsgs
+    if routed != metrics["ALL"] - metrics["DUP"]:
+        failures.append(
+            f"sender breakdown: {routed} messages attributed to a sender but "
+            f"ALL-DUP={metrics['ALL'] - metrics['DUP']}"
         )
 
     envelope = report.envelope
@@ -564,6 +601,28 @@ def main(argv: list) -> int:
     discoveryFailures = checkDiscovery(hits)
     failures.extend(discoveryFailures)
     print(f"  result: {'ok' if not discoveryFailures else 'MISS'}")
+
+    # ------------------------------------------------------------------ senders
+    #
+    # Every message from each declared short code, not only the ones carrying a
+    # txn signature -- which is what the discovery scan above counts. Reported
+    # rather than expected: these are exactly the numbers a bank moves when it
+    # re-homes its alerts, so a figure written into EXPECTED would only ever be
+    # re-derived from whatever the code printed. What is *asserted* is that they
+    # sum back to the routing buckets, in checkInvariants.
+    print()
+    print("-- senders: every message from each declared short code --")
+    stats = report.messageStats
+    for spec in REGISTRY:
+        for code in spec.senderCodes:
+            count = stats.senderCounts.get(code, 0)
+            quiet = "   <- declared but silent in this backup" if not count else ""
+            print(f"  sender {code:<8} {spec.id:<13} {count:>6}{quiet}")
+    noun = "sender" if stats.unknownSenders == 1 else "senders"
+    print(
+        f"  {'unregistered':<15} {'OTHER':<13} "
+        f"{stats.unknownSenderMsgs:>6}   from {stats.unknownSenders} {noun}"
+    )
 
     # ---------------------------------------------------------------- values
     print()

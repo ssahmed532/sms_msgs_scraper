@@ -108,8 +108,8 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_minor_one_over_the_2_3_0_interface(self):
-        """2.4.0, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_minor_one_over_the_2_4_0_interface(self):
+        """2.5.0, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -141,10 +141,23 @@ class TestReleaseShape(unittest.TestCase):
         naming it. Every existing command, option, default and output stream is
         exactly what 2.3.0 shipped, and the new command's own JSON and CSV rows
         are a new shape rather than a changed one.
+
+        2.5.0 adds `backup_info` and its `--verbose` flag: the file's size,
+        digest and modification time, its envelope accounting, where its
+        messages were routed, and -- under `--verbose` -- the per-sender,
+        per-skip-reason and per-duplicate breakdowns behind those counts.
+        MINOR for the same reason 2.4.0 was: purely additive, reachable only by
+        naming it, with a JSON and CSV shape of its own that no existing
+        consumer was reading.
+
+        The `ParseReport` gained a `messageStats` field to carry the sender
+        counts, and its schema version went 1 -> 2. That is not part of the
+        release number: no command reads or writes a serialised report, so no
+        caller of this tool can observe it.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "4", "0"))
+        self.assertEqual((major, minor, patch), ("2", "5", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

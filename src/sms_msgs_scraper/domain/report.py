@@ -85,6 +85,58 @@ class EnvelopeCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageStats:
+    """Which senders the file's messages came from, counted one per message.
+
+    The routing buckets say a bank sent 798 messages. They cannot say that 412
+    of those came from one short code and 386 from another, and that
+    distinction is this project's two worst bugs: Standard Chartered's `9220`
+    was never declared, and HBL re-homed its alerts from `4250` to `14250`
+    mid-history. Both are invisible in a per-bank total and obvious in a
+    per-sender one.
+
+    Counted *after* deduplication, alongside the routing buckets, so this
+    refines those counts exactly rather than describing a different population:
+
+        sum of a bank's own senderCounts == counts[bankId]
+        unknownSenderMsgs                == counts["OTHER"]
+
+    Only registered short codes are named. An unrecognized sender is a personal
+    phone number -- the other end of a message this tool never reads -- so
+    those are counted and not kept, the same rule that keeps a message body out
+    of a `ParseDiagnostic`.
+    """
+
+    senderCounts: Mapping[str, int] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    unknownSenders: int = 0
+    unknownSenderMsgs: int = 0
+
+    def countsFor(self, senderCodes) -> int:
+        """How many messages arrived from any of `senderCodes`."""
+        return sum(self.senderCounts.get(code, 0) for code in senderCodes)
+
+    def toDict(self) -> dict:
+        return {
+            "senderCounts": dict(self.senderCounts),
+            "unknownSenders": self.unknownSenders,
+            "unknownSenderMsgs": self.unknownSenderMsgs,
+        }
+
+    @classmethod
+    def fromDict(cls, data: dict) -> MessageStats:
+        return cls(
+            senderCounts=MappingProxyType(
+                {str(code): int(count)
+                 for code, count in data["senderCounts"].items()}
+            ),
+            unknownSenders=int(data["unknownSenders"]),
+            unknownSenderMsgs=int(data["unknownSenderMsgs"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DuplicateRecord:
     """One suppressed message, and enough context to defend the suppression.
 
@@ -120,7 +172,12 @@ class DuplicateRecord:
 
 # The report schema version, carried into machine-readable output so a script
 # can pin the shape it was written against.
-REPORT_SCHEMA_VERSION = 1
+#
+# 2 added `messageStats`. A version 1 document cannot be read back as one:
+# defaulting the field would present a backup whose senders were never
+# counted as one whose senders all counted zero, which is the one reading
+# the sender breakdown exists to make impossible.
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +191,7 @@ class ParseReport:
     diagnostics: tuple[ParseDiagnostic, ...] = ()
     duplicates: tuple[DuplicateRecord, ...] = ()
     duplicatePolicy: DuplicatePolicy = DuplicatePolicy.EXACT
+    messageStats: MessageStats = MessageStats()
 
     @property
     def ambiguousDuplicates(self) -> int:
@@ -165,6 +223,7 @@ class ParseReport:
             "diagnostics": [entry.toDict() for entry in self.diagnostics],
             "duplicates": [entry.toDict() for entry in self.duplicates],
             "duplicatePolicy": str(self.duplicatePolicy),
+            "messageStats": self.messageStats.toDict(),
         }
 
     @classmethod
@@ -188,4 +247,5 @@ class ParseReport:
                 DuplicateRecord.fromDict(item) for item in data["duplicates"]
             ),
             duplicatePolicy=DuplicatePolicy(data["duplicatePolicy"]),
+            messageStats=MessageStats.fromDict(data["messageStats"]),
         )

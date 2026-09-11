@@ -7,8 +7,8 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.4.0**, which adds `monthly_vendor_chart` — stacked monthly bars over credit card
-transactions and account debits together. See
+**Version 2.5.0**, which adds `backup_info` — what the backup file itself is: its size, its
+SHA-256, what it declares it holds against what was found in it, and where its messages went. See
 [what changed](#whats-new-in-200) if you are coming from 1.x — three things behave differently for
 an existing caller.
 
@@ -72,6 +72,29 @@ This is the only command that reads both stores. A merchant is a merchant, and w
 paid a bill is not something you should have to know before you can search for it — K-Electric is
 only ever an account debit, a fuel station is only ever a card, and one command finds either.
 
+### About the backup file itself
+
+| Command | Shows |
+|---|---|
+| `backup_info` | the file's size, SHA-256 and modification time; its envelope accounting; where its messages were routed; the window its transactions cover |
+
+This one describes the file rather than the spending in it, so it takes none of the filters below —
+a file does not have a date range. Its only option is `--verbose` / `-v`, which adds the
+breakdowns *inside* those counts: one row per declared sender short code, the parse failures by
+bank and reason, and how many suppressed duplicates could not be proved to be retransmissions.
+
+```bash
+uv run sms-txn backup.xml backup_info
+uv run sms-txn backup.xml backup_info --verbose
+uv run sms-txn --quiet --format json backup.xml backup_info --verbose > backup.json
+```
+
+The digest is the useful part when two runs disagree: it separates *the parser changed* from *the
+file changed*, which look identical in a count. The sender table is the useful part of `--verbose`
+— a declared short code sitting at zero is what a bank re-homing its alerts looks like from the
+outside, and that has caught this tool twice. Unrecognized senders are counted, never listed; they
+are personal phone numbers, and a list of them is a contact list.
+
 ```
          ██ ELECTRICITY — METER 1   ▓▓ ELECTRICITY — METER 2
 
@@ -130,7 +153,7 @@ All commands except `cc_spend_for_month` accept an inclusive date range:
 `--bank {HBL|FBL|SCB}` (case-insensitive), and `list_all_debit_txns` accepts
 `--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}`.
 
-**Every** command accepts the two vendor options:
+**Every command except `backup_info`** accepts the two vendor options:
 
 - `--vendor TEXT` — only transactions whose vendor matches. Case-insensitive substring, tested
   against the vendor as the bank sent it **and** against its canonical name, so `--vendor PSO`
@@ -141,7 +164,7 @@ All commands except `cc_spend_for_month` accept an inclusive date range:
 
 The two monthly summary commands and `cc_spend_for_month` accept `--verbose` / `-v`, which also
 lists the transactions the summary was built from. `monthly_vendor_chart` accepts
-`--group-by {vendor|bank|txn-type|none}`.
+`--group-by {vendor|bank|txn-type|none}`. `backup_info` accepts `--verbose` too, and nothing else.
 
 When `list_all_cc_txns` or `list_all_debit_txns` is given a date range and/or `--vendor`, its table
 output also carries an **Aggregate spend** block under the listing: one row per currency, with that
@@ -510,6 +533,25 @@ nothing anywhere by design.
 **Canonicalization never changes an amount, a transaction count or a total** — it only changes what
 the output calls things, and `tests/test_vendor_filter.py` pins that. It is also opt-in: without
 `--canonical-vendors`, every command reports the strings the banks sent.
+
+## What's new in 2.5.0
+
+`backup_info`: what the backup file *is*, rather than what was spent according to it — size,
+SHA-256, modification time, the declared record count against the one actually found, where the
+messages were routed, and the window the transactions cover.
+
+```bash
+uv run sms-txn backup.xml backup_info --verbose
+```
+
+`--verbose` adds the breakdowns behind those counts, and the sender table is the reason to run it:
+one row per declared short code, including the ones that sent nothing. A code at zero is what a
+bank re-homing its alerts looks like from the outside — this tool has been caught by that twice,
+once by Standard Chartered's undeclared `9220` and once by HBL's move from `4250` to `14250`.
+
+Purely additive, and MINOR for the same reason 2.4.0 was: a new command, reachable only by naming
+it, with a JSON and CSV shape of its own that no existing consumer was reading. Every other
+command, option, default and output stream is exactly what 2.4.0 shipped.
 
 ## What's new in 2.4.0
 

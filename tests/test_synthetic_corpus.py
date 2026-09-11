@@ -86,6 +86,50 @@ class TestRoutingAndConservation(SyntheticCorpusTestCase):
             with self.subTest(bucket=bucket):
                 self.assertEqual(self.report.count(bucket), count)
 
+    def test_the_per_sender_message_counts(self):
+        """The same messages again, split by the short code that sent them.
+
+        Derived from the fixture: 4250 carries six messages of which one is an
+        exact repeat, so five survive deduplication; 14250 two; 8756 six; 7220
+        four; 9220 two; 8079 seven; 9779 one. The unregistered 99999 sends two,
+        one of them a repeat, leaving one -- and its `<mms>` element and that
+        element's nested `<addr>` carry the same address without being
+        messages, which is why a grep of the fixture finds four.
+
+        These have to sum back to the per-bank counts above. A short code that
+        stopped being routed would leave that sum short while every other
+        number in this file stayed exactly as it is, which is precisely the
+        shape of the bug that lost 18 SCB transactions.
+        """
+        expected = {
+            "4250": 5,
+            "14250": 2,
+            "8756": 6,
+            "7220": 4,
+            "9220": 2,
+            "8079": 7,
+            "9779": 1,
+        }
+
+        self.assertEqual(dict(self.report.messageStats.senderCounts), expected)
+        self.assertEqual(self.report.messageStats.unknownSenderMsgs, 1)
+        self.assertEqual(self.report.messageStats.unknownSenders, 1)
+
+    def test_the_sender_counts_refine_the_bank_counts_exactly(self):
+        stats = self.report.messageStats
+
+        for spec in REGISTRY:
+            with self.subTest(bank=spec.id):
+                self.assertEqual(
+                    stats.countsFor(spec.senderCodes), self.report.count(spec.id)
+                )
+
+        self.assertEqual(stats.unknownSenderMsgs, self.report.count("OTHER"))
+        self.assertEqual(
+            sum(stats.senderCounts.values()) + stats.unknownSenderMsgs,
+            self.report.count("ALL") - self.report.count("DUP"),
+        )
+
     def test_both_short_codes_of_every_two_code_bank_are_routed(self):
         """HBL 4250/14250, SCB 7220/9220, Meezan 8079/9779.
 

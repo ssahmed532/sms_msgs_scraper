@@ -51,6 +51,19 @@ def txnSortKey(txn):
     )
 
 
+def txnDateSpan(txns):
+    """The earliest and latest transaction dates in a listing.
+
+    `(None, None)` for an empty listing rather than a raised `ValueError` from
+    `min()`: a backup holding no transactions is an ordinary answer -- a phone
+    that never banked by SMS -- and the caller renders it as an absent value
+    the same way it renders every other field a message did not carry.
+    """
+    dates = [txn.date for txn in txns]
+
+    return (min(dates), max(dates)) if dates else (None, None)
+
+
 def totalsByGroup(txns, keyFor) -> dict[str, dict[str, Money]]:
     """Exact totals per group, per currency, grouping by whatever `keyFor`
     returns.

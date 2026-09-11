@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.4.0.
+**Version:** 2.5.0.
 
 ### Semantic versioning is mandatory
 
@@ -89,7 +89,11 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 # Across BOTH stores at once:
 #   monthly_vendor_chart           - Stacked monthly bars, CC + debit together
 #
-# All six of those accept:
+# About the backup file itself, rather than the spending in it:
+#   backup_info                    - Size, SHA-256, envelope accounting, where
+#                                    the messages went, what the txns span
+#
+# The six txn commands other than cc_spend_for_month accept:
 #   --from-date YYYY-MM-DD         - only txns on or after this date (inclusive)
 #   --to-date   YYYY-MM-DD         - only txns on or before this date (inclusive)
 #
@@ -102,7 +106,7 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 # list_all_debit_txns also accepts:
 #   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
 #
-# ALL SEVEN accept the vendor pair:
+# ALL SEVEN TXN COMMANDS accept the vendor pair:
 #   --vendor TEXT                  - case-insensitive substring, matched against
 #                                    the vendor as sent AND its canonical name
 #   --canonical-vendors            - report vendors under their canonical names
@@ -112,6 +116,11 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 # monthly_vendor_chart also accepts:
 #   --group-by {vendor|bank|txn-type|none}   - what each bar is split into;
 #                                              default vendor
+#
+# backup_info takes NONE of the above -- no date range, no vendor pair, no
+# bank. It describes the file, and a file does not have a date range. Its only
+# option is --verbose / -v, which adds the per-sender, per-skip-reason and
+# per-duplicate breakdowns behind the counts it already prints.
 #
 # When list_all_cc_txns or list_all_debit_txns is given a date range and/or
 # --vendor, its table output also carries an "Aggregate spend" block: one
@@ -148,7 +157,17 @@ uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-v
 uv run sms-txn backup.xml monthly_vendor_chart --vendor "KE 04000003" --from-date 2025-01-01
 uv run sms-txn backup.xml monthly_vendor_chart --group-by bank
 uv run sms-txn --format csv backup.xml monthly_vendor_chart --group-by txn-type
+uv run sms-txn backup.xml backup_info
+uv run sms-txn backup.xml backup_info --verbose
 ```
+
+`backup_info` is the only command that reads the file **twice**: once through the parser, and once
+more to hash it. The digest is the point of the command. This project pins its reference numbers to
+one backup by its SHA-256, so being able to ask a file which one it is separates *the parser
+changed* from *the file changed* — two bugs that look identical in a count. `--verbose` adds the
+breakdowns inside the counts, and the sender table is the one worth reading: a declared short code
+sitting at zero is what a bank re-homing its alerts looks like from the outside, which has caught
+this tool twice.
 
 `python -m sms_msgs_scraper` is equivalent to `sms-txn` and works from a source checkout.
 
@@ -280,6 +299,7 @@ sms_msgs_scraper/
     ├── test_vendors.py / test_vendor_filter.py
     ├── test_filtered_spend_aggregate.py
     ├── test_monthly_vendor_chart.py
+    ├── test_backup_info.py
     ├── test_adversarial_input.py / test_adversarial_cli.py
     ├── test_import_layering.py
     ├── test_synthetic_corpus.py
@@ -420,8 +440,25 @@ via `okWithWarning` — a txn *and* a note, which is how an unrecognized SCB car
 transaction while still being reported.
 
 **`domain/report.py`** — the frozen `ParseReport`. Carries the envelope counts, the routing counts,
-the txns, the diagnostics, the duplicate policy and per-duplicate provenance. Serialises and reads
-back (`toDict` / `fromDict`), with amounts as exact strings.
+the txns, the diagnostics, the duplicate policy, per-duplicate provenance and the per-sender
+`MessageStats`. Serialises and reads back (`toDict` / `fromDict`), with amounts as exact strings.
+
+`MessageStats` is the routing counts split one level finer, by sender short code. A per-bank total
+of 798 cannot say that 412 of those came from `4250` and 386 from `14250`, and that is exactly the
+distinction both undeclared-sender bugs turned on. It is counted **after dedup, off the bucket each
+msg was routed into**, so it refines those counts rather than describing a different population:
+`countsFor(spec.senderCodes) == counts[spec.id]` for every bank, and `unknownSenderMsgs ==
+counts["OTHER"]`. Asserted by the verifier's invariants and by `tests/test_backup_info.py`.
+
+**Only registered short codes are named.** An unrecognized sender is a personal phone number, so
+those are counted and the strings dropped — the same structural rule that keeps a msg body out of a
+`ParseDiagnostic`. The report has no field one could be put in.
+
+**`BackupFileInfo`** — what the filesystem knows about a backup: size, mtime and SHA-256. Kept
+apart from `ParseReport` deliberately, since none of it comes from reading the XML. `mtime` is an
+absolute instant, so it is **converted** into `DEFAULT_TZ` rather than stamped with it — the
+opposite of the rule for the naive datetimes parsed out of a msg body, and correct for the same
+reason: there is a real instant here to convert.
 
 **`SmsBackupFileParser`** — one-shot. `parse(filepath)` returns a `ParseReport`; a second call on
 the same instance raises. It streams the file with `iterparse`, releasing each element as its record
@@ -702,6 +739,17 @@ record the derivation.** Never quietly edit this table to match observed output.
 - **`--vendor` is a substring match, so a short needle over-matches.** `--vendor PSO` also matches a
   merchant with `PSO` anywhere in its name. This is the intended trade: the alternative — exact
   equality — cannot find `PSO SERVICE STATION 7Karachi PAK` from the word a person would type.
+- **`backup_info` reports the txn span, not the msg span.** The window it prints is over
+  transaction dates — what the bank *said* — rather than over when the alerts arrived. That is the
+  more useful of the two and the only exact one: a received timestamp is when the network got round
+  to delivering the msg, measured on the reference backup at up to 2.9 hours late, and a backup's
+  non-bank msgs would widen the window without saying anything about spending.
+
+- **`backup_info` counts unrecognized senders without naming them.** So it can tell you 1,089 msgs
+  came from 137 senders no bank claims, and cannot tell you which. Naming them would print a
+  contact list. The discovery scan in `scripts/verify_against_backup.py` is the check that looks
+  *at* those senders, and it reports a short code only when one carries a bank's txn signature.
+
 - **A tz test cannot fail on a machine already set to +05:00** — `astimezone()` is a no-op there.
   Windows offers no way to simulate another timezone in-process, so the stamping rule is enforced by
   convention, by review, and by the verifier's tz-aware invariant.

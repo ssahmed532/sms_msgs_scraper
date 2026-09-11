@@ -162,6 +162,36 @@ def sanitizeField(value: str) -> str:
     return str(value).translate(_CONTROL_CHARS)
 
 
+# Binary units, because that is what a file size is: the units a filesystem
+# and every tool that reports one use. It stops at GiB rather than running up
+# to TiB, because `BackupLimits.maxBytes` refuses anything over 512 MiB long
+# before a size reaches this -- and a unit nothing can ever produce is a unit
+# nothing can ever check.
+_SIZE_UNITS = ("KiB", "MiB", "GiB")
+
+
+def humanBytes(count: int) -> str:
+    """A byte count at human scale, to sit beside the exact one.
+
+    Beside it, never instead of it. "2.4 MiB" is the number a person reads and
+    the wrong number to compare two backups with, so the exact count is always
+    the value and this is always the gloss.
+    """
+    if count < 1024:
+        return f"{count:,} bytes"
+
+    size = float(count)
+    unit = _SIZE_UNITS[0]
+
+    for nextUnit in _SIZE_UNITS:
+        unit = nextUnit
+        size /= 1024
+        if size < 1024:
+            break
+
+    return f"{size:,.1f} {unit}"
+
+
 def _styleFor(prefix: str, value) -> str:
     """Resolve a themed style name for a data value, falling back to the
     prefix's `.unknown` entry.
@@ -310,8 +340,17 @@ def dataTable(columns: list, caption: str | None = None) -> Table:
     return table
 
 
-def summaryTable(title: str | None = None, showFooter: bool = False) -> Table:
-    """Build the table used for a summary -- a handful of rows worth boxing."""
+def summaryTable(
+    title: str | None = None,
+    showFooter: bool = False,
+    caption: str | None = None,
+) -> Table:
+    """Build the table used for a summary -- a handful of rows worth boxing.
+
+    The caption is where a table says what its numbers mean -- which population
+    they were counted over, which policy produced them -- so that a reader is
+    never left inferring it from the title.
+    """
     return Table(
         title=title,
         title_style="table.title",
@@ -320,6 +359,9 @@ def summaryTable(title: str | None = None, showFooter: bool = False) -> Table:
         header_style="table.header",
         show_footer=showFooter,
         footer_style="column.total",
+        caption=caption,
+        caption_style="table.caption",
+        caption_justify="right",
         expand=False,
     )
 

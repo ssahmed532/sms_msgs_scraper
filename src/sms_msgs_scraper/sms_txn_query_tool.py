@@ -57,6 +57,7 @@ from sms_msgs_scraper.render.console_ui import (
 )
 from sms_msgs_scraper.render.tables import (
     aggregateSpendTable,
+    backupInfoTables,
     bankSpendTable,
     ccTxnsTable,
     debitTxnsTable,
@@ -64,7 +65,11 @@ from sms_msgs_scraper.render.tables import (
     printParseSummary,
     vendorsTable,
 )
-from sms_msgs_scraper.sms_backup_file_parser import BackupFileError, SmsBackupFileParser
+from sms_msgs_scraper.sms_backup_file_parser import (
+    BackupFileError,
+    BackupFileInfo,
+    SmsBackupFileParser,
+)
 
 # Read from the installed package metadata rather than written here. The
 # number used to live in three hand-synced places and had already drifted
@@ -138,6 +143,12 @@ click.rich_click.COMMAND_GROUPS = {
             "name": "Across both (credit card + account debit)",
             "commands": [
                 "monthly_vendor_chart",
+            ],
+        },
+        {
+            "name": "About the backup file itself",
+            "commands": [
+                "backup_info",
             ],
         },
     ]
@@ -1012,6 +1023,60 @@ def _seriesGrouping(groupBy, txns):
         return seriesFor, ordered, "Type"
 
     return (lambda txn: txn.vendor), sorted({txn.vendor for txn in txns}), "Vendor"
+
+
+@cli.command("backup_info")
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Also break the messages down by sender short code, by parse-failure "
+    "reason, and by how much of the deduplication was a judgement call.",
+)
+@click.pass_context
+def backup_info(ctx, verbose):
+    """Describe the backup file itself, rather than the spending in it.
+
+    Its size, its SHA-256, when it was last written; what it declares it holds
+    against what was actually found in it; where its messages were routed; and
+    the window its transactions cover.
+
+    The digest is the useful part when two runs disagree. This project pins its
+    reference numbers to one backup by its SHA-256, so being able to ask a file
+    which one it is separates "the parser changed" from "the file changed" --
+    two very different bugs that look identical in a count.
+
+    With [bold]--verbose[/] it adds the breakdowns *inside* those counts: one
+    row per declared sender short code, the parse failures by bank and reason,
+    and how many suppressed duplicates could not be proved to be
+    retransmissions. The sender table is the one worth reading -- a short code
+    that has gone quiet is what a bank re-homing its alerts looks like from
+    the outside, and this tool has been caught by that twice.
+
+    Unrecognized senders are counted, never listed. They are personal phone
+    numbers, and a list of them is a contact list.
+    """
+    app = ctx.obj
+    # The report first: it is what fails on an unreadable or malformed backup,
+    # and it should fail as that rather than as a digest that could not be
+    # computed.
+    report = app.report()
+    fileInfo = BackupFileInfo.forPath(app.filepath)
+
+    if app.machineReadable:
+        _writeMachineOutput(
+            app,
+            "backup_info",
+            machine.INFO_COLUMNS,
+            machine.backupInfoRows(fileInfo, report, verbose),
+        )
+        return
+
+    printRule("Backup file")
+
+    for table in backupInfoTables(fileInfo, report, verbose):
+        console.print(table)
 
 
 def _emitMonthly(

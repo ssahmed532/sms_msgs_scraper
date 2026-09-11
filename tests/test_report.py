@@ -15,6 +15,7 @@ from sms_msgs_scraper.domain.report import (
     DuplicatePolicy,
     DuplicateRecord,
     EnvelopeCounts,
+    MessageStats,
     ParseReport,
 )
 from sms_msgs_scraper.domain.types import CardReference
@@ -129,6 +130,11 @@ class TestParseReport(unittest.TestCase):
                 ),
             ),
             duplicatePolicy=DuplicatePolicy.EXACT,
+            messageStats=MessageStats(
+                senderCounts=MappingProxyType({"4250": 2, "7220": 1}),
+                unknownSenders=1,
+                unknownSenderMsgs=1,
+            ),
         )
 
     def test_a_report_serialises_and_reads_back_identically(self):
@@ -181,6 +187,45 @@ class TestParseReport(unittest.TestCase):
 
         self.assertEqual(report.count("HBL"), 2)
         self.assertEqual(report.count("MEZN"), 0)
+
+
+class TestMessageStats(unittest.TestCase):
+    """The sender breakdown, and the population it is counted over.
+
+    It refines the routing buckets rather than describing a different set of
+    messages, which is what lets a per-bank total be checked against the short
+    codes that actually produced it -- the check that neither of this
+    project's two undeclared-sender bugs had.
+    """
+
+    def _stats(self):
+        return MessageStats(
+            senderCounts=MappingProxyType({"4250": 412, "14250": 386}),
+            unknownSenders=137,
+            unknownSenderMsgs=1089,
+        )
+
+    def test_counts_for_sums_a_banks_own_short_codes(self):
+        self.assertEqual(self._stats().countsFor(("4250", "14250")), 798)
+
+    def test_a_short_code_that_sent_nothing_counts_zero_rather_than_raising(self):
+        """A declared code with no messages is a finding, not an error: it is
+        what a bank re-homing its alerts looks like from the outside.
+        """
+        self.assertEqual(self._stats().countsFor(("9220",)), 0)
+
+    def test_stats_survive_a_serialisation_round_trip(self):
+        restored = MessageStats.fromDict(self._stats().toDict())
+
+        self.assertEqual(restored, self._stats())
+        self.assertEqual(restored.senderCounts["14250"], 386)
+
+    def test_the_default_is_an_empty_breakdown_not_a_missing_one(self):
+        empty = MessageStats()
+
+        self.assertEqual(dict(empty.senderCounts), {})
+        self.assertEqual(empty.unknownSenders, 0)
+        self.assertEqual(empty.unknownSenderMsgs, 0)
 
 
 if __name__ == "__main__":

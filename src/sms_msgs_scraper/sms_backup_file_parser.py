@@ -27,6 +27,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 
@@ -38,8 +39,10 @@ from sms_msgs_scraper.domain.report import (
     DuplicatePolicy,
     DuplicateRecord,
     EnvelopeCounts,
+    MessageStats,
     ParseReport,
 )
+from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.parser.registry import REGISTRY
 
 ROOT_TAG = "smses"
@@ -71,6 +74,58 @@ class BackupLimits:
     # A real backup nests three deep at most: smses > mms > parts > part.
     # A document nested far beyond that is not a backup, whatever else it is.
     maxDepth: int = 32
+
+
+# Hashing reads the file a block at a time rather than whole. The size it is
+# handed is bounded only by `BackupLimits.maxBytes`, and a 512 MB read to
+# produce 64 hex characters would be a strange way to spend memory.
+DIGEST_BLOCK_BYTES = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class BackupFileInfo:
+    """What the filesystem knows about a backup, before anything is read out of
+    it.
+
+    The digest is here because this project already identifies a backup by one:
+    `scripts/verify_against_backup.py` ties its expected values to a specific
+    file's SHA-256, and the reference numbers in `CLAUDE.md` are recorded
+    against that same hash. Being able to ask a backup which one it is turns
+    "the numbers moved" into "the numbers moved and so did the file", which are
+    very different bugs.
+
+    Deliberately separate from `ParseReport`: none of this comes from reading
+    the XML, and a report describes what a file *contained* rather than what
+    the filesystem says about it.
+    """
+
+    path: Path
+    sizeBytes: int
+    modifiedAt: datetime
+    sha256: str
+
+    @classmethod
+    def forPath(cls, filepath) -> BackupFileInfo:
+        filepath = Path(filepath)
+        stat = filepath.stat()
+        digest = hashlib.sha256()
+
+        with filepath.open("rb") as handle:
+            for block in iter(lambda: handle.read(DIGEST_BLOCK_BYTES), b""):
+                digest.update(block)
+
+        return cls(
+            path=filepath,
+            sizeBytes=stat.st_size,
+            # `st_mtime` is an absolute instant, so this *converts* into
+            # Asia/Karachi rather than stamping it on. That is the opposite of
+            # the rule for the naive datetimes parsed out of a message body,
+            # and correct for the same reason: there is a real instant here to
+            # convert, where a body's "15/Jan/2025" is a local wall clock with
+            # no offset in it at all.
+            modifiedAt=datetime.fromtimestamp(stat.st_mtime, tz=DEFAULT_TZ),
+            sha256=digest.hexdigest(),
+        )
 
 
 # XML entity expansion -- the "billion laughs" family -- is the one XML attack
@@ -185,6 +240,13 @@ class SmsBackupFileParser:
         # digest -> index of the message that first carried it. Digests only:
         # the message bodies themselves are never retained.
         seenDigests: dict[str, int] = {}
+        # Per-sender message counts, for the registered short codes only. The
+        # unrecognised senders are counted through a set that is read for its
+        # size and then dropped: those strings are personal phone numbers, and
+        # nothing downstream has any business being handed one.
+        senderCounts: dict[str, int] = defaultdict(int)
+        unknownSenders: set[str] = set()
+        unknownSenderMsgs = 0
 
         declared = None
         actual = 0
@@ -269,7 +331,7 @@ class SmsBackupFileParser:
                         )
                     else:
                         smsCount += 1
-                        self._routeRecord(
+                        bucket = self._routeRecord(
                             record,
                             counts,
                             ccTxns,
@@ -278,6 +340,16 @@ class SmsBackupFileParser:
                             duplicates,
                             seenDigests,
                         )
+                        # Tallied off the bucket the message was actually
+                        # counted into, rather than off a second registry
+                        # lookup, so the sender breakdown cannot disagree with
+                        # the routing it is supposed to refine. A duplicate is
+                        # counted by neither: it was suppressed before routing.
+                        if bucket == "OTHER":
+                            unknownSenderMsgs += 1
+                            unknownSenders.add(record.sender)
+                        elif bucket != "DUP":
+                            senderCounts[record.sender] += 1
 
                 # release the element, and detach it from the root, so the
                 # document does not accumulate in memory as it is read
@@ -310,6 +382,11 @@ class SmsBackupFileParser:
             diagnostics=tuple(diagnostics),
             duplicates=tuple(duplicates),
             duplicatePolicy=self.duplicatePolicy,
+            messageStats=MessageStats(
+                senderCounts=MappingProxyType(dict(senderCounts)),
+                unknownSenders=len(unknownSenders),
+                unknownSenderMsgs=unknownSenderMsgs,
+            ),
         )
 
     def _readEnvelope(self, root: ET.Element) -> int | None:
@@ -353,11 +430,14 @@ class SmsBackupFileParser:
         diagnostics,
         duplicates,
         seenDigests,
-    ) -> None:
+    ) -> str:
         """Send one message to its bank's parser, or count it as unrecognised.
 
         Every counted message lands in exactly one bucket, which is what makes
-        `ALL == <banks> + OTHER + DUP` provable rather than hopeful.
+        `ALL == <banks> + OTHER + DUP` provable rather than hopeful. The bucket
+        it landed in is returned, so a caller can break it down further -- by
+        sender short code -- without repeating the routing decision and risking
+        a breakdown that disagrees with the counts it breaks down.
         """
         counts["ALL"] += 1
 
@@ -388,17 +468,17 @@ class SmsBackupFileParser:
                         ),
                     )
                 )
-                return
+                return "DUP"
             seenDigests[digest] = record.index
 
         if spec is None:
             counts["OTHER"] += 1
-            return
+            return "OTHER"
 
         counts[spec.id] += 1
 
         if not spec.signal(record):
-            return
+            return spec.id
 
         result = spec.extract(record)
 
@@ -407,9 +487,11 @@ class SmsBackupFileParser:
 
         if not result.succeeded:
             counts[spec.skippedBucket] += 1
-            return
+            return spec.id
 
         if spec.txnKind is TxnKind.CREDIT_CARD:
             ccTxns.append(result.txn)
         else:
             debitTxns.append(result.txn)
+
+        return spec.id
