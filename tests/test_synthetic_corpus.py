@@ -22,6 +22,7 @@ that there was something to compare; keeping the counts in one place is what
 makes a fixture edit a one-file change.
 """
 
+import re
 import unittest
 from collections import Counter
 from dataclasses import replace
@@ -259,6 +260,23 @@ class TestInvariants(SyntheticCorpusTestCase):
         for txn in self.report.ccTxns:
             with self.subTest(bank=txn.bank):
                 self.assertIn(txn.bank, REGISTRY.ccBankIds)
+
+    def test_no_vendor_or_account_field_carries_a_card_or_account_number(self):
+        """A Meezan payee embeds the beneficiary's account number and a bill
+        description embeds the consumer number. Every run of ten or more
+        digits is masked to its last four as the report is assembled, for
+        every bank, so no listing, chart or `--vendor` match can print one. The fixture's
+        transfers carry such numbers, so this fails the day the mask is
+        bypassed -- and the last assertion is what proves it fired at all.
+        """
+        longRun = re.compile(r"\d{10,}")
+
+        for txn in list(self.report.ccTxns) + list(self.report.debitTxns):
+            with self.subTest(vendor=txn.vendor):
+                self.assertIsNone(longRun.search(txn.vendor))
+                self.assertIsNone(longRun.search(getattr(txn, "acctMask", "")))
+
+        self.assertTrue(any("xxxx" in txn.vendor for txn in self.report.debitTxns))
 
     def test_no_diagnostic_carries_anything_from_a_body(self):
         """Every vendor in the fixture is prefixed SYNTHETIC, so a body leaking

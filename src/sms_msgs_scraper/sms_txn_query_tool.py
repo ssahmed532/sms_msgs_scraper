@@ -186,6 +186,17 @@ class AppContext:
     def machineReadable(self) -> bool:
         return self.outputFormat != "table"
 
+    def furniture(self, printer, *args) -> None:
+        """Print something *about* the run on stderr -- unless `--quiet`.
+
+        Every rule, notice and empty-state panel goes through here, so the
+        flag means one thing everywhere. It used to gate only the header, the
+        parse summary and the diagnostics, and a table-mode run under
+        `--quiet` still left the command's own rule and notice on stderr.
+        """
+        if not self.quiet:
+            printer(*args)
+
     def vendorMap(self):
         """The canonical-vendor table, loaded the first time one is wanted.
 
@@ -339,8 +350,8 @@ class StrictFailure(click.ClickException):
     "-q",
     is_flag=True,
     default=False,
-    help="Suppress the header, parse summary and diagnostics on stderr. "
-    "Results on stdout are unaffected.",
+    help="Suppress everything on stderr: the header, parse summary, notices "
+    "and diagnostics. Results on stdout are unaffected.",
 )
 @click.option(
     "--strict",
@@ -634,13 +645,13 @@ def _emit(ctx, kind, columns, rows, table, emptyMessage, notice, aggregate=None)
         _writeMachineOutput(app, kind, columns, rows)
         return
 
-    printRule(notice.title)
+    app.furniture(printRule, notice.title)
 
     if not rows:
-        printEmptyState(emptyMessage)
+        app.furniture(printEmptyState, emptyMessage)
         return
 
-    printNotice(notice.line)
+    app.furniture(printNotice, notice.line)
     console.print(table())
 
     if aggregate is not None:
@@ -961,20 +972,21 @@ def monthly_vendor_chart(ctx, from_date, to_date, vendor, canonical_vendors, gro
         )
         return
 
-    printRule("Monthly spending chart")
+    app.furniture(printRule, "Monthly spending chart")
 
     if not txns:
-        printEmptyState("No transactions match this filter.")
+        app.furniture(printEmptyState, "No transactions match this filter.")
         return
 
-    printNotice(
+    app.furniture(
+        printNotice,
         f"Charting {len(txns):,} transactions by {group_by}"
         f"{_filterLabel(
             from_date,
             to_date,
             vendor=vendor,
             canonicalVendors=canonical_vendors,
-        )}:"
+        )}:",
     )
 
     counts = countsByGroup(txns, lambda txn: (seriesFor(txn), txn.money.currency))
@@ -1076,7 +1088,7 @@ def backup_info(ctx, verbose):
         )
         return
 
-    printRule("Backup file")
+    app.furniture(printRule, "Backup file")
 
     for table in backupInfoTables(fileInfo, report, verbose):
         console.print(table)
@@ -1101,13 +1113,13 @@ def _emitMonthly(
         _writeMachineOutput(app, "monthly_summary", machine.MONTHLY_COLUMNS, rows)
         return
 
-    printRule(title)
+    app.furniture(printRule, title)
 
     if not txns:
-        printEmptyState(emptyMessage)
+        app.furniture(printEmptyState, emptyMessage)
         return
 
-    printNotice(line)
+    app.furniture(printNotice, line)
 
     if verbose:
         console.print(detailTable())

@@ -202,7 +202,46 @@ class TestStreamContract(CliTestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("IMTIAZ SUPER MARKET", result.stdout)
-        self.assertNotIn("Messages parsed", result.stderr)
+        self.assertEqual(result.stderr, "")
+
+    def test_quiet_means_an_empty_stderr_for_every_command(self):
+        """`--quiet` used to gate only the header, the parse summary and the
+        diagnostics, so every table command still left its own rule and
+        notice on stderr -- about 600 bytes -- and an empty result left its
+        panel. The flag is documented as suppressing everything on stderr,
+        and this is what makes that true rather than nearly true.
+        """
+        backupPath = self._standardBackup()
+        commands = [
+            ["list_all_vendors"],
+            ["list_all_cc_txns"],
+            ["monthly_cc_spending_summary"],
+            ["monthly_cc_spending_summary", "--verbose"],
+            ["cc_spend_for_month", "--month", "2023-10"],
+            ["list_all_debit_txns"],
+            ["monthly_debit_spending_summary"],
+            ["monthly_vendor_chart"],
+            ["backup_info"],
+            ["backup_info", "--verbose"],
+            # the empty state is furniture too
+            ["list_all_cc_txns", "--vendor", "NOTHING MATCHES THIS"],
+            ["monthly_vendor_chart", "--vendor", "NOTHING MATCHES THIS"],
+            ["cc_spend_for_month", "--month", "1999-01"],
+        ]
+
+        for command in commands:
+            with self.subTest(command=" ".join(command)):
+                result = self.run_cli(["--quiet", str(backupPath), *command])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(result.stderr, "")
+
+    def test_without_quiet_the_furniture_is_still_there(self):
+        """The other half of the flag: silence is opt-in."""
+        result = self.run_cli([str(self._standardBackup()), "list_all_cc_txns"])
+
+        self.assertIn("Credit card transactions", result.stderr)
+        self.assertIn("Found 3 CC transactions", result.stderr)
 
 
 class TestOutputFormats(CliTestCase):

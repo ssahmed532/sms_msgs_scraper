@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.5.1.
+**Version:** 2.5.2.
 
 ### Semantic versioning is mandatory
 
@@ -45,6 +45,12 @@ The CLI no longer restates it: `sms_msgs_scraper.__version__` reads the installe
 via `importlib.metadata`, and `@click.version_option` uses that. All of this is pinned by
 `tests/test_versioning.py`, including the lockfile — the one that gets forgotten, because nothing
 about editing `pyproject.toml` prompts you to re-run `uv lock`.
+
+**The lockfile pin only bites under `--locked`.** A plain `uv run` re-locks a stale `uv.lock`
+*before* it launches the test suite, so the test then reads a lockfile that was repaired moments
+earlier and passes. It can only fail under `uv run --locked`, `uv run --frozen`, or with
+`UV_LOCKED=1` in the environment. CI sets `UV_LOCKED=1` on the job so every `uv` invocation in it
+asserts, and `tests/test_versioning.py` pins that the workflow does.
 
 ## Development Commands
 
@@ -154,7 +160,7 @@ uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
 uv run sms-txn --format csv backup.xml list_all_debit_txns --txn-type atm_withdrawal > atm.csv
 uv run sms-txn backup.xml list_all_cc_txns --vendor PSO
 uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-vendors
-uv run sms-txn backup.xml monthly_vendor_chart --vendor "KE 04000003" --from-date 2025-01-01
+uv run sms-txn backup.xml monthly_vendor_chart --vendor "KE xxxxxxxxx0001" --from-date 2025-01-01
 uv run sms-txn backup.xml monthly_vendor_chart --group-by bank
 uv run sms-txn --format csv backup.xml monthly_vendor_chart --group-by txn-type
 uv run sms-txn backup.xml backup_info
@@ -211,7 +217,7 @@ re-derive the expectation and record the derivation — never edit the number to
 
 ```bash
 uv sync                 # install/refresh .venv from uv.lock
-uv sync --frozen        # what CI does: enforce the lockfile rather than trust it
+uv sync --locked        # what CI does: enforce the lockfile rather than trust it
 uv lock --upgrade       # re-resolve within pyproject.toml constraints
 uv build                # build the wheel and sdist
 ```
@@ -263,7 +269,7 @@ sms_msgs_scraper/
 │       │   └── vendor_aliases.json    # EXAMPLE canonical-vendor table (no real data)
 │       ├── domain/               # the core: stdlib only, imports nothing above it
 │       │   ├── money.py          # Money, the amount grammar, minor units
-│       │   ├── types.py          # CardReference
+│       │   ├── types.py          # CardReference, maskAccountNumbers
 │       │   ├── tz.py             # DEFAULT_TZ, and nothing else
 │       │   ├── message.py        # SmsRecord
 │       │   ├── cc_txn.py         # CreditCardTxnDC
@@ -444,7 +450,7 @@ the txns, the diagnostics, the duplicate policy, per-duplicate provenance and th
 `MessageStats`. Serialises and reads back (`toDict` / `fromDict`), with amounts as exact strings.
 
 `MessageStats` is the routing counts split one level finer, by sender short code. A per-bank total
-of 798 cannot say that 412 of those came from `4250` and 386 from `14250`, and that is exactly the
+of 798 cannot say that 481 of those came from `4250` and 317 from `14250`, and that is exactly the
 distinction both undeclared-sender bugs turned on. It is counted **after dedup, off the bucket each
 msg was routed into**, so it refines those counts rather than describing a different population:
 `countsFor(spec.senderCodes) == counts[spec.id]` for every bank, and `unknownSenderMsgs ==
@@ -452,7 +458,8 @@ counts["OTHER"]`. Asserted by the verifier's invariants and by `tests/test_backu
 
 **Only registered short codes are named.** An unrecognized sender is a personal phone number, so
 those are counted and the strings dropped — the same structural rule that keeps a msg body out of a
-`ParseDiagnostic`. The report has no field one could be put in.
+`ParseDiagnostic`. The report has no field one could be put in: `DuplicateRecord.sender` is `-` for
+a repeat from an unrecognized sender, and until 2.5.2 that was the one field that did hold one.
 
 **`BackupFileInfo`** — what the filesystem knows about a backup: size, mtime and SHA-256. Kept
 apart from `ParseReport` deliberately, since none of it comes from reading the XML. `mtime` is an
@@ -577,7 +584,10 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
    leading and trailing whitespace before an alias is stored, so `"prefix": ["KE "]` is held as
    `ke` and claims `KENTUCKY...` as readily as the electricity bill. The packaged example's note
    asserted the opposite until 2.4.0. Anchor by extending the prefix into content that is actually
-   stable — the fixed opening digits of a consumer number, or the whole word.
+   stable — the whole word, or the consumer number *as the vendor list shows it*
+   (`KE xxxxxxxxx0001`). Every run of ten or more digits is masked to its last four before a vendor
+   is stored, so the opening digits of a number are never there to anchor on, and an alias written
+   against the raw message is dead on arrival.
 4. **Nothing derived from a real backup gets committed** — this repository is public. That covers
    third parties (Meezan's funds-transfer payees are largely individuals) and the account holder
    equally: a school, a hospital and a utility together locate a person. All of it belongs in the
@@ -606,6 +616,18 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
   the namespace's `.unknown` style.
 - **A parse failure returns a `ParseResult` carrying a `ParseDiagnostic`** — never `None`, never an
   exception, never a printed line, and never the msg body.
+- **A vendor or account field never carries a card, account or consumer number.** Meezan names a
+  transfer's payee as the beneficiary *and their account number* and embeds the consumer number in
+  a bill's description, so the debit vendor column printed full 16-digit card numbers until 2.5.2.
+  `maskAccountNumbers` in `domain/types.py` replaces any run of ten or more digits with `x`s and its
+  last four (`SCB-xxxxxxxxxxxx5496`), and the orchestrator applies it to every transaction's vendor
+  — and a debit's account clause — as the report is assembled, at the one point all four banks pass
+  through. Not a Meezan rule, and not a parser's job: a Standard Chartered merchant descriptor on
+  the reference backup carries an 11-digit phone number, and a rule four parsers each have to
+  remember is the shape of bug this project keeps meeting. `extract()` still returns the payee as
+  the bank wrote it; the report never holds one, and nothing downstream has to remember to redact.
+  Asserted by the verifier's invariants on every run, by `tests/test_synthetic_corpus.py` on the
+  fixture, whose transfers carry such numbers, and per bank in `tests/test_sms_backup_file_parser.py`.
 - **No `assert` anywhere in `src/`.** Pinned by
   `test_adversarial_input.TestNoAssertionsOnInput`, which walks the AST of every module. An `assert`
   disappears under `python -O`, so any assertion whose truth depends on a message is a behaviour
@@ -615,7 +637,7 @@ Dear Customer, Your HBL CreditCard (ending with XXXX) has been charged at VENDOR
   Click ≥8.2 derives command names by replacing underscores with dashes.
 - Tests use `unittest` (not pytest) and build XML programmatically via `ET.Element`.
 
-## Reference numbers (backup `sms-20251011130814.xml`, re-derived 2026-08-29)
+## Reference numbers (backup `sms-20251011130814.xml`, re-derived 2026-08-29; sender, duplicate and vendor rows 2026-09-12)
 
 Gate on these when changing parsing or routing. Msg counts are **post-dedup runtime** values — a
 raw-corpus grep will always be higher and is not comparable.
@@ -625,17 +647,19 @@ raw-corpus grep will always be higher and is not comparable.
 | envelope declared / actual / sms / mms / invalid | 4,719 / 4,719 / 4,665 / 54 / 0 |
 | `ALL` / `DUP` | 4,665 / 235 |
 | msgs HBL / FBL / SCB / MEZN / OTHER | 798 / 674 / 641 / 1,228 / 1,089 |
+| msgs per sender `4250` / `14250` / `8756` / `7220` / `9220` / `8079` / `9779` | 481 / 317 / 674 / 614 / 27 / 1,126 / 102 |
+| distinct unrecognized senders behind `OTHER` | 213 |
 | `ccTxns` total | 1,696 |
 | CC txns HBL / FBL / SCB | 717 / 583 / 396 |
 | skipped HBL / FBL / SCB / MEZN | 0 / 0 / 26 / 0 |
 | `debitTxns` total | 875 |
 | debit card_purchase / atm_withdrawal / account_debit / funds_transfer | 8 / 361 / 96 / 410 |
-| unique vendors HBL / FBL / SCB / MEZN | 180 / 166 / 96 / 189 |
+| unique vendors HBL / FBL / SCB / MEZN | 180 / 166 / 96 / 188 |
 | unique CC vendor union (HBL ∪ FBL ∪ SCB) | 359 |
 | FBL currency split PKR / USD / CAD | 574 / 8 / 1 |
-| ambiguous duplicates | 31 |
-| `vendor_aliases.local.json` aliases / canonical names | 69 / 58 |
-| raw vendor strings (CC ∪ debit) → canonical | 545 → 431 |
+| ambiguous duplicates | 5 |
+| `vendor_aliases.local.json` aliases / canonical names | 68 / 57 |
+| raw vendor strings (CC ∪ debit) → canonical | 544 → 431 |
 | unique CC vendors under `--canonical-vendors` | 271 |
 
 The three vendor rows describe **`vendor_aliases.local.json`**, the private table, not the packaged
@@ -663,12 +687,34 @@ union 357 → 359, so 9 of the 11 vendor strings in those msgs were already know
 moved**: `ALL`, `DUP`, HBL, FBL, MEZN and every debit count are unchanged, which is what makes the
 recovery attributable rather than merely coincident with a rewrite.
 
+**Derivation of the changes in 2.5.2.** Three rows were re-derived and two added, all read off
+`backup_info --verbose --format json` and the verifier, and none moving any count or total above:
+
+- **Per-sender counts and distinct unrecognized senders are new rows.** 2.5.0 wrote "412 from
+  `4250` and 386 from `14250`" and "137 senders" into this file without deriving either; the file
+  says 481 / 317 and 213 (pre-dedup the HBL split is 483 / 323, so neither documented figure was
+  any real count). Both are now asserted by the verifier's `EXPECTED` table, which is the check
+  that would have refused the invented ones.
+- **Ambiguous duplicates 31 → 5.** The 31 counted every suppressed HBL or SCB repeat; only 5 of
+  them are transaction alerts. The other 26 are repeated promotions, statement and
+  payment-received notices, which carry no purchase for a second purchase to be confused with.
+  The 5 are consistent with the residual analysis under Known limitations below (3 with a
+  plausible arrival gap, 2 within seconds).
+- **Unique MEZN vendors 189 → 188, raw vendor strings 545 → 544.** Masking digit runs to their
+  last four collapsed two gas-bill strings that differed only in a consumer number sharing its
+  last four. That left the private table's `SSGC` entry grouping one spelling, which the verifier
+  refuses as dead config, so the entry was removed: 69 / 58 → 68 / 57. The canonical count (431)
+  and the CC vendor figures are untouched: the one CC vendor carrying a long digit run is an SCB
+  descriptor with an 11-digit phone number in it (two txns, one string before and after masking).
+
 The 26 SCB skips are the bank's own malformed msgs: 21 truncated mid-body and 5 carrying a literal
 `PKR .00`. They are expected, not a defect.
 
-`ambiguous duplicates` is a conservative **upper bound**: it counts every suppressed duplicate from
-a bank whose alerts carry no time of day (HBL and SCB), not only those whose arrival gap makes a
-genuine repeat plausible.
+`ambiguous duplicates` is a conservative **upper bound**: it counts every suppressed *transaction
+alert* from a bank whose alerts carry no time of day (HBL and SCB), not only those whose arrival
+gap makes a genuine repeat plausible. A repeated promotion or statement notice from those banks is
+not counted — there is no purchase in it to be ambiguous about — which is what took the figure
+from 31 to 5.
 
 **If a number here stops reproducing, fix the code or re-derive the expectation from the corpus and
 record the derivation.** Never quietly edit this table to match observed output.
@@ -693,6 +739,11 @@ record the derivation.** Never quietly edit this table to match observed output.
   byte-identical retransmissions, so this has no effect in practice.
 - **SCB vendors keep a glued-on city** (`SOUTH CITY HOSPITALKarachi PAK`) — the corpus offers no
   reliable separator, so no split is attempted.
+- **Two accounts whose numbers share their last four digits become one vendor string.** The mask
+  keeps only the last four of a run of ten or more digits, so two Meezan payees or bills that differ
+  only earlier in the number are indistinguishable once stored. On the reference backup this
+  happens once — two gas bills — and the alias table already grouped them as one merchant. The
+  alternative, keeping more digits, weakens the mask on exactly the 10-digit numbers it exists for.
 - **SCB card masks:** the last 4 digits are recovered from any mask whose digits are interrupted by
   a masked section, so a 6-digit BIN works. A shape that is neither that nor an unmasked BIN-only
   run keeps its transaction and is reported, because a silent absent-card is exactly what a change
@@ -748,7 +799,7 @@ record the derivation.** Never quietly edit this table to match observed output.
   non-bank msgs would widen the window without saying anything about spending.
 
 - **`backup_info` counts unrecognized senders without naming them.** So it can tell you 1,089 msgs
-  came from 137 senders no bank claims, and cannot tell you which. Naming them would print a
+  came from 213 senders no bank claims, and cannot tell you which. Naming them would print a
   contact list. The discovery scan in `scripts/verify_against_backup.py` is the check that looks
   *at* those senders, and it reports a short code only when one carries a bank's txn signature.
 

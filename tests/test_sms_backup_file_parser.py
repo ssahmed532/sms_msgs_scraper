@@ -2,6 +2,7 @@
 the conservation identity.
 """
 
+import json
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -262,6 +263,21 @@ class TestDeduplication(BackupTestCase):
         self.assertEqual(report.count("OTHER"), 1)
         self.assertConserved(report)
 
+    def test_a_duplicate_from_an_unknown_sender_is_recorded_without_naming_it(self):
+        """The report has no field an unrecognised sender may sit in, and the
+        duplicate record used to be one. That sender is a personal phone
+        number; the two indices already say which messages were involved.
+        """
+        promo = self._createSms("03001234567", "Buy two get one free!")
+
+        report = self._parseBackup([promo, self._createSms("03001234567", "Buy two get one free!")])
+
+        self.assertEqual(len(report.duplicates), 1)
+        self.assertEqual(report.duplicates[0].sender, "-")
+        self.assertEqual(report.duplicates[0].firstIndex, 0)
+        self.assertEqual(report.duplicates[0].duplicateIndex, 1)
+        self.assertNotIn("03001234567", json.dumps(report.toDict()))
+
     def test_an_identical_body_from_two_senders_is_not_a_duplicate(self):
         """The identity includes the sender.
 
@@ -313,6 +329,26 @@ class TestDuplicatePolicy(BackupTestCase):
         self.assertTrue(report.duplicates[0].ambiguous)
         self.assertEqual(report.ambiguousDuplicates, 1)
 
+    def test_a_repeated_non_txn_alert_from_a_date_only_bank_is_not_ambiguous(self):
+        """Only a transaction alert can be an ambiguous suppression.
+
+        A repeated promotion or statement notice from HBL carries no purchase,
+        so there is nothing about it that a second purchase could be confused
+        with. Flagging it inflated the count on the reference backup from 5 to
+        31, and the number stood in the documentation as though it measured
+        possible double purchases.
+        """
+        promo = self._createSms("4250", "Enjoy 10% off with your HBL card this weekend!")
+
+        report = self._parseBackup(
+            [promo, self._createSms("4250", "Enjoy 10% off with your HBL card this weekend!")]
+        )
+
+        self.assertEqual(report.count("DUP"), 1)
+        self.assertEqual(report.duplicates[0].sender, "4250")
+        self.assertFalse(report.duplicates[0].ambiguous)
+        self.assertEqual(report.ambiguousDuplicates, 0)
+
     def test_a_timestamped_bank_duplicate_is_not_ambiguous(self):
         """FBL alerts carry a time to the second, so it provably is the same
         transaction."""
@@ -341,6 +377,61 @@ class TestDuplicatePolicy(BackupTestCase):
         )
 
         self.assertEqual(report.duplicatePolicy, DuplicatePolicy.REVIEW)
+
+
+class TestIdentifierMasking(BackupTestCase):
+    """No vendor or account field in a report carries a run of ten or more
+    digits, whichever bank it came from.
+
+    The rule is applied where the report is assembled rather than in each
+    parser, because it turned out not to be a Meezan rule: the reference
+    backup has a Standard Chartered merchant descriptor with an 11-digit phone
+    number in it. The digit runs below are sequential placeholders.
+    """
+
+    def test_a_credit_card_vendor_is_masked(self):
+        report = self._parseBackup(
+            [self._createHblTxnSms(vendor="EXAMPLE TOPUP 12345678901")]
+        )
+
+        self.assertEqual(report.ccTxns[0].vendor, "EXAMPLE TOPUP xxxxxxx8901")
+
+    def test_a_glued_scb_descriptor_is_masked(self):
+        report = self._parseBackup(
+            [self._createScbTxnSms(vendor="EXAMPLE.COM  12345678901 PAK")]
+        )
+
+        self.assertEqual(report.ccTxns[0].vendor, "EXAMPLE.COM  xxxxxxx8901 PAK")
+
+    def test_a_debit_vendor_and_account_clause_are_masked(self):
+        body = (
+            "PKR 1,000.00 sent to EXAMPLE PAYEE HBL-1234567890123456 from your "
+            "A/C 1234567890 of KARACHI BRANCH on 19-Sep-23 at 10:01 Bal: PKR 1.00"
+        )
+
+        report = self._parseBackup([self._createSms("8079", body)])
+
+        self.assertEqual(report.debitTxns[0].vendor, "EXAMPLE PAYEE HBL-xxxxxxxxxxxx3456")
+        self.assertEqual(report.debitTxns[0].acctMask, "xxxxxx7890")
+
+    def test_a_vendor_without_a_long_run_is_untouched(self):
+        report = self._parseBackup([self._createHblTxnSms(vendor="STATION 123456789")])
+
+        self.assertEqual(report.ccTxns[0].vendor, "STATION 123456789")
+
+    def test_the_masked_vendor_is_what_the_report_sorts_and_groups_by(self):
+        """Masking runs before the sort, so two payees that mask to one string
+        sit together and count as one vendor -- the order the tool documents
+        is the order of what it prints."""
+        report = self._parseBackup(
+            [
+                self._createHblTxnSms(vendor="EXAMPLE TOPUP 12345678901", amount="10.00"),
+                self._createHblTxnSms(vendor="EXAMPLE TOPUP 99999998901", amount="20.00"),
+            ]
+        )
+
+        self.assertEqual(report.allVendors, {"EXAMPLE TOPUP xxxxxxx8901"})
+        self.assertEqual(len(report.ccTxns), 2)
 
 
 class TestOneShotParsing(BackupTestCase):

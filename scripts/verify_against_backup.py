@@ -70,6 +70,7 @@ from sms_msgs_scraper.domain.bank import (  # noqa: E402
     TxnKind,
 )
 from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord  # noqa: E402
+from sms_msgs_scraper.domain.types import LONG_DIGIT_RUN_PTTRN  # noqa: E402
 from sms_msgs_scraper.domain.vendors import (  # noqa: E402
     VendorAliasMap,
     normalizeVendor,
@@ -101,9 +102,11 @@ LOCAL_VENDOR_MAP_PATH = REPO_ROOT / "vendor_aliases.local.json"
 DISCOVERY_ALLOWLIST: dict[str, str] = {}
 
 # Derived 2026-08-29 from the reference backup, after Standard Chartered's
-# second short code (9220) was declared. The message counts are *post-dedup*
-# runtime values: the parser dedups before parsing, so grepping the raw XML
-# gives higher numbers for every bank and is not comparable.
+# second short code (9220) was declared; the per-sender rows, the ambiguous
+# duplicate count and the Meezan vendor count re-derived 2026-09-12 (see the
+# Reference numbers table in CLAUDE.md for each derivation). The message counts
+# are *post-dedup* runtime values: the parser dedups before parsing, so grepping
+# the raw XML gives higher numbers for every bank and is not comparable.
 EXPECTED = {
     # envelope: what the file declared, against what it held
     "envelope_declared": 4719,
@@ -119,6 +122,19 @@ EXPECTED = {
     "MEZN": 1228,
     "OTHER": 1089,
     "DUP": 235,
+    # the same routing counts, one level finer: per declared short code, and
+    # how many distinct unrecognised senders OTHER came from. These are what a
+    # bank moves when it re-homes its alerts, which is exactly why they are
+    # asserted: the previous documented HBL split (412/386) was never derived
+    # from the file, and nothing here would have said so.
+    "sender_4250": 481,
+    "sender_14250": 317,
+    "sender_8756": 674,
+    "sender_7220": 614,
+    "sender_9220": 27,
+    "sender_8079": 1126,
+    "sender_9779": 102,
+    "unknown_senders": 213,
     # messages carrying a txn signal that could not be parsed. SCB's 26 are the
     # bank's own malformed messages: 21 truncated mid-body, 5 carrying a literal
     # "PKR .00" with no amount. A change here means something moved.
@@ -139,22 +155,27 @@ EXPECTED = {
     "debit_funds_transfer": 410,
     # Vendor counts are the tripwire for a broken extraction rule: a build can
     # hit every txn count above while extracting garbage vendors, since a set of
-    # empty strings still counts as one vendor.
+    # empty strings still counts as one vendor. MEZN is 188 rather than the 189
+    # raw spellings because any run of ten or more digits is masked to its last
+    # four as the report is assembled, and two gas-bill strings differing only
+    # in a consumer number with the same last four collapse into one.
     "vendors_HBL": 180,
     "vendors_FBL": 166,
     "vendors_SCB": 96,
-    "vendors_MEZN": 189,
+    "vendors_MEZN": 188,
     "vendors_cc_all": 359,
     # FBL is the only bank in the corpus sending more than one currency
     "fbl_pkr": 574,
     "fbl_usd": 8,
     "fbl_cad": 1,
     # deduplication, and how much of it involved a judgement call. Ambiguous
-    # duplicates are those from a bank whose alerts carry no time of day, where
-    # a second genuine identical purchase cannot be ruled out. A conservative
-    # upper bound: it counts every such suppression.
+    # duplicates are repeated *transaction alerts* from a bank whose alerts
+    # carry no time of day, where a second genuine identical purchase cannot be
+    # ruled out. Still a conservative upper bound over those five; the 31 it
+    # replaces also counted repeated promotions and statement notices, which
+    # carry no purchase to be ambiguous about.
     "duplicates": 235,
-    "ambiguous_duplicates": 31,
+    "ambiguous_duplicates": 5,
     # diagnostics, by reason
     "diagnostics": 26,
     "diag_no_template_match": 26,
@@ -265,10 +286,10 @@ def collectMetrics(report) -> dict:
 
     metrics["unknown_senders"] = report.messageStats.unknownSenders
 
-    # Per-sender message counts. Deliberately *reported*, never expected: they
-    # are what a re-homed short code moves, and a number written down here
-    # would only ever be re-derived from whatever the code printed. The
-    # invariant below is what actually holds them honest.
+    # Per-sender message counts. Expected as well as reported: the invariant in
+    # checkInvariants holds them consistent with the routing buckets, and the
+    # EXPECTED rows hold them to the file -- which is the check the documented
+    # HBL split never had.
     for spec in REGISTRY:
         for code in spec.senderCodes:
             metrics[f"sender_{code}"] = report.messageStats.senderCounts.get(code, 0)
@@ -379,6 +400,20 @@ def checkInvariants(report, metrics: dict) -> list:
     allTxns = list(report.ccTxns) + list(report.debitTxns)
 
     check("vendor non-empty", lambda t: bool(t.vendor and t.vendor.strip()), allTxns)
+    # A run of ten or more digits is a card, account or consumer number, and
+    # the orchestrator masks every one to its last four as the report is
+    # assembled. The Meezan vendor column printed full card numbers until it
+    # did, and an SCB descriptor carried a phone number.
+    check(
+        "vendor carries no card or account number",
+        lambda t: not LONG_DIGIT_RUN_PTTRN.search(t.vendor),
+        allTxns,
+    )
+    check(
+        "account mask carries no full account number",
+        lambda t: not LONG_DIGIT_RUN_PTTRN.search(t.acctMask),
+        report.debitTxns,
+    )
     check("amount positive", lambda t: t.money.isPositive, allTxns)
     check("amount is exact Decimal", lambda t: isinstance(t.money.amount, Decimal), allTxns)
     check("currency well-formed", lambda t: len(t.money.currency) == 3, allTxns)
@@ -605,11 +640,10 @@ def main(argv: list) -> int:
     # ------------------------------------------------------------------ senders
     #
     # Every message from each declared short code, not only the ones carrying a
-    # txn signature -- which is what the discovery scan above counts. Reported
-    # rather than expected: these are exactly the numbers a bank moves when it
-    # re-homes its alerts, so a figure written into EXPECTED would only ever be
-    # re-derived from whatever the code printed. What is *asserted* is that they
-    # sum back to the routing buckets, in checkInvariants.
+    # txn signature -- which is what the discovery scan above counts. These are
+    # exactly the numbers a bank moves when it re-homes its alerts, so they are
+    # both asserted against the reference backup (the sender_* rows of EXPECTED)
+    # and held to the routing buckets they refine, in checkInvariants.
     print()
     print("-- senders: every message from each declared short code --")
     stats = report.messageStats

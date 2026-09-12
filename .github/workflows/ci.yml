@@ -17,6 +17,14 @@ jobs:
   check:
     runs-on: windows-latest
 
+    env:
+      # Every `uv run` below asserts that the committed lockfile is current,
+      # instead of quietly re-locking it first. Without this the lockfile pin
+      # in tests/test_versioning.py could not fail here: a pyproject edit that
+      # skipped `uv lock` was repaired on the fly by the very `uv run` that
+      # launched the test suite, and the stale lock passed green.
+      UV_LOCKED: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,10 +34,12 @@ jobs:
           enable-cache: true
 
       - name: Sync the locked environment
-        # --frozen so the lockfile is enforced rather than trusted: a
+        # --locked so the lockfile is enforced rather than trusted: a
         # pyproject edit that was never followed by `uv lock` fails here
-        # instead of resolving to something nobody recorded.
-        run: uv sync --frozen --all-extras
+        # instead of resolving to something nobody recorded. (--frozen would
+        # install whatever the lockfile says without checking it against
+        # pyproject at all.)
+        run: uv sync --locked --all-extras
 
       - name: Lint
         run: uv run --with ruff ruff check .
@@ -46,6 +56,10 @@ jobs:
 
       - name: Installed-wheel smoke test
         shell: pwsh
+        env:
+          # No project is involved here, so there is no lockfile to assert
+          # against, and uv warns when the flag is set anyway.
+          UV_LOCKED: "0"
         # The wheel's filename carries the version, so it must not be written
         # out here. Pinned to a literal it went stale at 2.1.0, and this step
         # would then fail on a file that no longer exists -- a red build for a

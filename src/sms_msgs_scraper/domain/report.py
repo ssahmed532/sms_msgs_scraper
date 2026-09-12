@@ -88,9 +88,10 @@ class EnvelopeCounts:
 class MessageStats:
     """Which senders the file's messages came from, counted one per message.
 
-    The routing buckets say a bank sent 798 messages. They cannot say that 412
-    of those came from one short code and 386 from another, and that
-    distinction is this project's two worst bugs: Standard Chartered's `9220`
+    The routing buckets say a bank sent 798 messages. They cannot say that 481
+    of those came from one short code and 317 from another (the reference
+    backup's HBL split, re-derived 2026-09-12), and that distinction is this
+    project's two worst bugs: Standard Chartered's `9220`
     was never declared, and HBL re-homed its alerts from `4250` to `14250`
     mid-history. Both are invisible in a per-bank total and obvious in a
     per-sender one.
@@ -140,11 +141,18 @@ class MessageStats:
 class DuplicateRecord:
     """One suppressed message, and enough context to defend the suppression.
 
-    `ambiguous` is the honest part. It is set when the sending bank's alerts
-    carry a date but no time of day, so an identical body is equally consistent
-    with a retransmission and with a second, genuine, identical purchase. For
-    banks whose alerts carry a timestamp to the second, an identical body
-    provably *is* the same transaction and this is False.
+    `ambiguous` is the honest part. It is set when the suppressed message is a
+    transaction alert from a bank whose alerts carry a date but no time of
+    day, so an identical body is equally consistent with a retransmission and
+    with a second, genuine, identical purchase. For banks whose alerts carry a
+    timestamp to the second, an identical body provably *is* the same
+    transaction and this is False -- as it is for a repeated promotion or
+    statement notice from any bank, which carries no purchase to be ambiguous
+    about.
+
+    `sender` names a registered short code only. A repeat from an
+    unrecognised sender is recorded as `-`: that sender is a personal phone
+    number, and the two indices already say which messages were involved.
     """
 
     sender: str

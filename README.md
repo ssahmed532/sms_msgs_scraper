@@ -7,8 +7,9 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.5.1**, a patch: the chart's axis ticks, change marker and bar apportionment corrected,
-the senders footer relabelled, and an alias table can no longer claim one string under two names.
+**Version 2.5.2**, a patch: vendor and account fields no longer carry a card, account, consumer or
+phone number (any run of ten or more digits is masked to its last four), `--quiet` now means an
+empty stderr, and a repeated non-transaction message no longer counts as an ambiguous duplicate.
 2.5.0 added `backup_info` — what the backup file itself is: its size, its SHA-256, what it declares
 it holds against what was found in it, and where its messages went. See
 [what changed](#whats-new-in-200) if you are coming from 1.x — three things behave differently for
@@ -182,7 +183,7 @@ positional argument.
 | Option | Effect |
 |---|---|
 | `--format {table,json,csv}` | how results are written to stdout (default `table`) |
-| `--quiet` / `-q` | suppress the header, parse summary and diagnostics on stderr |
+| `--quiet` / `-q` | suppress everything on stderr: the header, parse summary, notices, empty-result panels and diagnostics |
 | `--strict` | exit non-zero if any message could not be parsed |
 | `--duplicates {exact,none,review}` | how a repeated message is treated (default `exact`) |
 | `--vendor-map PATH` | a canonical-vendor table to use instead of the one shipped with the tool |
@@ -270,9 +271,9 @@ A utility bill is an account debit, so it is the second list it appears in. Say 
 strings — two meters, each paid through three different channels:
 
 ```
-KE 0400000000001 ATM        KE 0400000000002 ATM
-KE 0400000000001 FROM IB    KE 0400000000002 FROM IB
-KE 0400000000001 FROM MB    KE 0400000000002 FROM MB
+KE xxxxxxxxx0001 ATM        KE xxxxxxxxx0002 ATM
+KE xxxxxxxxx0001 FROM IB    KE xxxxxxxxx0002 FROM IB
+KE xxxxxxxxx0001 FROM MB    KE xxxxxxxxx0002 FROM MB
 ```
 
 Chart that as it stands and you get six series for what is one bill — and because the chart names
@@ -285,7 +286,12 @@ nothing to do with the money. That is what step 2 is for.
 Add an entry to your `--vendor-map` file (see [Canonical vendor names](#canonical-vendor-names)
 below for the full schema). Within one meter the consumer number is fixed and only the channel
 suffix varies — and a suffix has no fixed set you could enumerate — so a `prefix` alias stopping at
-the end of the consumer number is the narrowest thing that covers all three spellings:
+the end of the consumer number is the narrowest thing that covers all three spellings.
+
+The `x`s are the tool's, not the bank's. Every run of ten or more digits in a vendor is masked to
+its last four before the transaction enters the report, so a listing never prints a full consumer,
+account, card or phone number — and an alias has to match the masked form, because that is the
+only form the tool ever holds:
 
 ```json
 {
@@ -293,17 +299,17 @@ the end of the consumer number is the narrowest thing that covers all three spel
   "canonicalVendors": {
     "ELECTRICITY — METER 1": {
       "note": "Consumer number is fixed; the suffix is the payment channel.",
-      "prefix": ["KE 0400000000001"]
+      "prefix": ["KE xxxxxxxxx0001"]
     },
     "ELECTRICITY — METER 2": {
-      "prefix": ["KE 0400000000002"]
+      "prefix": ["KE xxxxxxxxx0002"]
     }
   }
 }
 ```
 
-One entry claiming both meters — `"prefix": ["KE 04000000000"]` under a single
-`ELECTRICITY` name — gives you the combined bill instead. Which you want is a real choice: two
+One entry claiming both meters — `"prefix": ["KE xxxxxxxxx0001", "KE xxxxxxxxx0002"]`
+under a single `ELECTRICITY` name — gives you the combined bill instead. Which you want is a real choice: two
 entries chart the meters as separate stacked segments, one entry charts their sum.
 
 ### 3. Chart it
@@ -474,6 +480,12 @@ with something you do not control.
 merely start with the same word, and mis-attributed spending looks exactly like real spending.
 `SHELL` is a prefix of a great many things that are not the fuel brand.
 
+**Write aliases against the vendor list, not against the message.** Any run of ten or more digits
+in a vendor — an account number in a transfer payee, a consumer number in a bill, a phone number in
+a card descriptor — is masked to its last four before the transaction enters the report, so
+`KE xxxxxxxxx0001` is what there is to match and the opening digits of the number are never there
+to anchor on.
+
 **A trailing space does not anchor a prefix.** Aliases are normalized before they are stored, and
 normalization strips leading and trailing whitespace — so `"prefix": ["KE "]` is stored as `ke` and
 claims `KENTUCKY...` and `KEENU...` along with the electricity bill. To anchor on a word boundary,
@@ -535,6 +547,31 @@ nothing anywhere by design.
 **Canonicalization never changes an amount, a transaction count or a total** — it only changes what
 the output calls things, and `tests/test_vendor_filter.py` pins that. It is also opt-in: without
 `--canonical-vendors`, every command reports the strings the banks sent.
+
+## What's new in 2.5.2
+
+A patch release: the P0 and P1 items of an adversarial review of 2.1.0–2.5.1. No new capability,
+and no existing invocation changes meaning.
+
+- **Vendor and account fields no longer carry card, account, consumer or phone numbers.** A
+  Meezan transfer's payee is the beneficiary's name *and their account number*, and a bill's
+  description embeds the consumer number, so `list_all_debit_txns`, the chart and `--vendor`
+  printed full 16-digit card numbers; one Standard Chartered descriptor carried a phone number.
+  Any run of ten or more digits is now masked to its last four as the report is assembled
+  (`SCB-xxxxxxxxxxxx5496`), for every bank, so the report never holds one. The vendor *strings*
+  of those transactions change; no amount, count or total does. Two accounts whose numbers share
+  their last four become one vendor string — on the reference backup that happened once.
+- **`--quiet` means an empty stderr.** It gated the header, parse summary and diagnostics, and
+  every table command still left its own rule and notice — about 600 bytes — on stderr.
+- **A repeated promotion or statement notice is no longer an "ambiguous duplicate".** Only a
+  repeated *transaction alert* from a bank whose alerts carry no time of day can be one. On the
+  reference backup the count falls from 31 to 5.
+- **A duplicate from an unrecognized sender is recorded without naming the sender.** That was the
+  one field of a serialised report that could hold a personal phone number.
+- **CI asserts the lockfile on every `uv` invocation.** A plain `uv run` re-locks a stale
+  `uv.lock` before the test suite starts, so the test that pins the lockfile could not fail there.
+- Two reference numbers written into the documentation by 2.5.0 had never been derived from the
+  backup, and are now derived, recorded and asserted by the verifier.
 
 ## What's new in 2.5.1
 

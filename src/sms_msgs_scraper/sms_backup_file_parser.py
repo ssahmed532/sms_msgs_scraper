@@ -26,7 +26,7 @@ retained DOM held them.
 import hashlib
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -42,6 +42,7 @@ from sms_msgs_scraper.domain.report import (
     MessageStats,
     ParseReport,
 )
+from sms_msgs_scraper.domain.types import maskAccountNumbers
 from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.parser.registry import REGISTRY
 
@@ -141,6 +142,30 @@ PROLOG_SNIFF_BYTES = 8192
 # One shared instance rather than a fresh default per call. BackupLimits is
 # frozen, so there is nothing a caller could mutate through it.
 DEFAULT_LIMITS = BackupLimits()
+
+
+def _maskIdentifiers(txn):
+    """Mask any card, account or consumer number out of a transaction's vendor
+    and account fields before it enters the report.
+
+    Meezan names a transfer's payee as the beneficiary *and their account
+    number*, and embeds the consumer number in a bill's description, which is
+    how full 16-digit card numbers reached the debit listing, the chart and
+    `--vendor`. But it is not a Meezan rule: a Standard Chartered merchant
+    descriptor on the reference backup carries an 11-digit phone number too.
+    So the mask is applied here, at the one point every bank's transactions
+    pass through, rather than in each parser -- a rule four parsers each have
+    to remember is the shape of bug this project keeps meeting, and the report
+    is the one thing every output is rendered from.
+    """
+    fields = {"vendor": maskAccountNumbers(txn.vendor)}
+    if hasattr(txn, "acctMask"):
+        fields["acctMask"] = maskAccountNumbers(txn.acctMask)
+
+    if all(getattr(txn, name) == value for name, value in fields.items()):
+        return txn
+
+    return replace(txn, **fields)
 
 
 def _rejectDoctype(filepath: Path) -> None:
@@ -454,17 +479,27 @@ class SmsBackupFileParser:
                 counts["DUP"] += 1
                 duplicates.append(
                     DuplicateRecord(
-                        sender=record.sender,
+                        # Only a registered short code is named. An
+                        # unrecognised sender is a personal phone number, and
+                        # the digest already identifies the pair of messages,
+                        # so the string adds nothing the report may hold.
+                        sender=record.sender if spec is not None else "-",
                         firstIndex=firstIndex,
                         duplicateIndex=record.index,
-                        # A suppression is ambiguous when the bank's alerts
-                        # carry no time of day, so a second genuine identical
-                        # purchase that day cannot be told from a
-                        # retransmission. This is a conservative upper bound:
-                        # it flags every such suppression, not only the ones
-                        # whose arrival gap makes a repeat plausible.
+                        # A suppression is ambiguous when it is a transaction
+                        # alert from a bank whose alerts carry no time of day:
+                        # a second genuine identical purchase that day cannot
+                        # be told from a retransmission. The signal check is
+                        # what keeps a repeated promotion or statement notice
+                        # out of the count -- those carry no purchase, so
+                        # there is nothing about them to be ambiguous. Still a
+                        # conservative upper bound: it flags every such alert,
+                        # not only the ones whose arrival gap makes a repeat
+                        # plausible.
                         ambiguous=bool(
-                            spec is not None and not spec.has(Capability.TXN_TIME)
+                            spec is not None
+                            and not spec.has(Capability.TXN_TIME)
+                            and spec.signal(record)
                         ),
                     )
                 )
@@ -489,9 +524,11 @@ class SmsBackupFileParser:
             counts[spec.skippedBucket] += 1
             return spec.id
 
+        txn = _maskIdentifiers(result.txn)
+
         if spec.txnKind is TxnKind.CREDIT_CARD:
-            ccTxns.append(result.txn)
+            ccTxns.append(txn)
         else:
-            debitTxns.append(result.txn)
+            debitTxns.append(txn)
 
         return spec.id

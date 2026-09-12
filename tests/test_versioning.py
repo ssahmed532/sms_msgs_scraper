@@ -86,7 +86,14 @@ class TestVersionSources(unittest.TestCase):
 
         Editing `pyproject.toml` does not touch `uv.lock`, so a version bump
         that skipped `uv lock` leaves the lockfile pinning the previous release
-        -- and `uv sync --frozen` in CI would then install it.
+        -- and `uv sync --locked` in CI would then refuse to install it.
+
+        Only meaningful under `uv run --locked` (or `--frozen`, or with
+        `UV_LOCKED=1` in the environment). A plain `uv run` re-locks a stale
+        lockfile *before* launching the test suite, so this test then reads a
+        lockfile that was repaired moments earlier and passes -- which is how
+        it sat green in CI while being unable to fail. The test below pins the
+        workflow to the form under which this one can.
         """
         with LOCKFILE_PATH.open("rb") as handle:
             lockfile = tomllib.load(handle)
@@ -107,9 +114,28 @@ class TestVersionSources(unittest.TestCase):
         )
 
 
+    def test_ci_runs_every_uv_command_with_the_lockfile_asserted(self):
+        """Without this, the lockfile test above self-heals in CI.
+
+        Reproduced on a scratch copy with `pyproject.toml` bumped and `uv.lock`
+        left behind: `uv run --locked python -m unittest ...` fails the test as
+        designed, while plain `uv run ...` rewrites `uv.lock` first and passes.
+        `UV_LOCKED` on the job makes every `uv run` in it assert instead.
+        """
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('UV_LOCKED: "1"', workflow)
+        self.assertIn("uv sync --locked", workflow)
+        self.assertNotIn(
+            "uv sync --frozen",
+            workflow,
+            "--frozen installs the lockfile without checking it against pyproject",
+        )
+
+
 class TestReleaseShape(unittest.TestCase):
     def test_this_release_is_a_patch_over_the_2_5_0_interface(self):
-        """2.5.1, chosen by what the release does to an existing caller.
+        """2.5.2, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -165,10 +191,23 @@ class TestReleaseShape(unittest.TestCase):
         canonical name and as a `prefix` under another -- a narrowing of what
         a map file may say, but of a shape the loader's own documentation
         already promised to refuse, and one no table was relying on.
+
+        2.5.2 is a PATCH: the P0 and P1 items of the adversarial review of
+        2.1.0-2.5.1, and no new capability. Vendor and account fields mask
+        any run of ten or more digits to its last four -- a Meezan payee's
+        account number, a bill's consumer number, a phone number in an SCB
+        descriptor -- so a listing no longer prints one. The vendor *strings*
+        change for those transactions, but no invocation changes meaning, no
+        amount or count moves, and a string that was a full account number
+        was never an interface anyone should have been parsing. A duplicate from an
+        unrecognised sender is recorded without naming it; a repeated
+        non-transaction message no longer counts as an ambiguous duplicate;
+        `--quiet` now silences the rules, notices and empty-state panels it
+        left on stderr; and CI asserts the lockfile on every `uv` invocation.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "5", "1"))
+        self.assertEqual((major, minor, patch), ("2", "5", "2"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

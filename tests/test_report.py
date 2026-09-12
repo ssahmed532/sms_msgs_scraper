@@ -199,14 +199,19 @@ class TestMessageStats(unittest.TestCase):
     """
 
     def _stats(self):
+        # Deliberately toy values. The first version of this fixture carried
+        # numbers that read as the reference backup's real per-sender split and
+        # were then copied into the documentation as though they had been
+        # derived from it; they had not. A fixture that is obviously invented
+        # cannot be mistaken for a measurement.
         return MessageStats(
-            senderCounts=MappingProxyType({"4250": 412, "14250": 386}),
-            unknownSenders=137,
-            unknownSenderMsgs=1089,
+            senderCounts=MappingProxyType({"4250": 7, "14250": 5}),
+            unknownSenders=3,
+            unknownSenderMsgs=11,
         )
 
     def test_counts_for_sums_a_banks_own_short_codes(self):
-        self.assertEqual(self._stats().countsFor(("4250", "14250")), 798)
+        self.assertEqual(self._stats().countsFor(("4250", "14250")), 12)
 
     def test_a_short_code_that_sent_nothing_counts_zero_rather_than_raising(self):
         """A declared code with no messages is a finding, not an error: it is
@@ -218,7 +223,7 @@ class TestMessageStats(unittest.TestCase):
         restored = MessageStats.fromDict(self._stats().toDict())
 
         self.assertEqual(restored, self._stats())
-        self.assertEqual(restored.senderCounts["14250"], 386)
+        self.assertEqual(restored.senderCounts["14250"], 5)
 
     def test_the_default_is_an_empty_breakdown_not_a_missing_one(self):
         empty = MessageStats()

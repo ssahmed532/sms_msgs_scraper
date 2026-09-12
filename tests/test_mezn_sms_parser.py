@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -10,6 +11,7 @@ from sms_msgs_scraper.domain.debit_txn import DebitTxnType
 from sms_msgs_scraper.domain.diagnostics import SkipReason
 from sms_msgs_scraper.domain.message import SmsRecord
 from sms_msgs_scraper.domain.money import Money
+from sms_msgs_scraper.domain.types import maskAccountNumbers
 from sms_msgs_scraper.domain.tz import DEFAULT_TZ
 from sms_msgs_scraper.parser.mezn_sms_parser import MeznSmsParser
 from sms_msgs_scraper.sms_backup_file_parser import SmsBackupFileParser
@@ -52,6 +54,30 @@ def record(body: str, sender: str = MEZN_SENDER) -> SmsRecord:
 
 def extract(body: str):
     return MeznSmsParser.extract(record(body))
+
+
+def smsElement(body: str, sender: str = MEZN_SENDER) -> ET.Element:
+    sms = ET.Element("sms")
+    sms.set("address", sender)
+    sms.set("body", body)
+    sms.set("readable_date", "Sep 19, 2023 7:42:00 PM")
+
+    return sms
+
+
+def parseBackup(testCase: unittest.TestCase, msgElements: list):
+    """Write the elements out as a backup file and parse it through the
+    orchestrator -- the whole pipeline, not `extract()` alone."""
+    root = ET.Element("smses")
+    root.set("count", str(len(msgElements)))
+    root.extend(msgElements)
+
+    tmpDir = tempfile.TemporaryDirectory()
+    testCase.addCleanup(tmpDir.cleanup)
+    backupFilepath = Path(tmpDir.name) / "sms_backup.xml"
+    ET.ElementTree(root).write(backupFilepath, encoding="utf-8")
+
+    return SmsBackupFileParser().parse(backupFilepath)
 
 
 class TestMeznTxnSignal(unittest.TestCase):
@@ -214,6 +240,119 @@ class TestMeznTemplateFamilies(unittest.TestCase):
 
         self.assertEqual(txn.vendor, "L.FOODS AC# PK......2413 as RAAST payment")
         self.assertEqual(txn.acctMask, "xxxxxx5602")
+
+
+class TestMeznVendorMasking(unittest.TestCase):
+    """No card or account number survives into a vendor or account field.
+
+    A Meezan transfer names its payee as the beneficiary's name *and their
+    account number*, and a bill payment's description embeds the consumer
+    number, so the vendor column of every debit listing printed full 16-digit
+    card numbers and account numbers. The mask is applied as the report is
+    assembled -- the report being the one thing every output is rendered from
+    -- so these go through the orchestrator rather than `extract()`, which
+    still returns the payee as the bank wrote it. The digit runs below are
+    sequential placeholders, not numbers.
+    """
+
+    LONG_RUN = re.compile(r"\d{10,}")
+
+    def _txn(self, body):
+        report = parseBackup(self, [smsElement(body)])
+        self.assertEqual(report.count("MEZN_SKIPPED"), 0, report.diagnostics)
+
+        return report.debitTxns[0]
+
+    def test_a_payee_account_number_is_masked_to_its_last_four(self):
+        txn = self._txn(
+            "PKR 1,000.00 sent to EXAMPLE PAYEE HBL-1234567890123456 from your "
+            "A/C xxxxxx5602 of KHAYABAN-E-SEHAR KHI on 19-Sep-23 at 10:01 "
+            "Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.vendor, "EXAMPLE PAYEE HBL-xxxxxxxxxxxx3456")
+
+    def test_a_consumer_number_in_a_bill_description_is_masked(self):
+        txn = self._txn(
+            "PKR 2,000.00 is debited as EXAMPLE GAS 1234567890 FROM MB from your "
+            "A/C xxxxxx5602 of KHAYABAN-E-SEHAR KHI on 20-Sep-23 at 09:45 "
+            "Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.vendor, "EXAMPLE GAS xxxxxx7890 FROM MB")
+
+    def test_a_short_digit_run_is_part_of_a_name_and_stays(self):
+        """Nine digits is under the threshold: a terminal id, a station number
+        or a date is a name's business, not an identifier's."""
+        txn = self._txn(
+            "PKR 500.00 is debited as EXAMPLE STATION 123456789 from your "
+            "A/C xxxxxx5602 of KHAYABAN-E-SEHAR KHI on 20-Sep-23 at 09:45 "
+            "Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.vendor, "EXAMPLE STATION 123456789")
+
+    def test_every_long_run_in_one_vendor_is_masked(self):
+        txn = self._txn(
+            "PKR 1,000.00 SENT TO EXAMPLE PAYEE 1234567890 REF 9876543210987 "
+            "on 19-Sep-23 at 11:36 Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.vendor, "EXAMPLE PAYEE xxxxxx7890 REF xxxxxxxxx0987")
+
+    def test_the_banks_own_mask_is_left_exactly_as_sent(self):
+        txn = self._txn(
+            "PKR 1,000.00 sent to EXAMPLE PAYEE (MBL AC 0113xxxxxx0267) from "
+            "your A/C xxxxxx5602 on 16-Nov-23 at 22:15 Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.vendor, "EXAMPLE PAYEE (MBL AC 0113xxxxxx0267)")
+        self.assertEqual(txn.acctMask, "xxxxxx5602")
+
+    def test_an_account_clause_the_bank_forgot_to_mask_is_masked_too(self):
+        txn = self._txn(
+            "PKR 1,000.00 sent to EXAMPLE PAYEE from your A/C 1234567890123456 "
+            "of KHAYABAN-E-SEHAR KHI on 19-Sep-23 at 10:01 Bal: PKR 1.00"
+        )
+
+        self.assertEqual(txn.acctMask, "xxxxxxxxxxxx3456")
+
+    def test_extract_itself_returns_the_payee_as_the_bank_wrote_it(self):
+        """The parser is not where the rule lives, and this pins that it does
+        not quietly grow a copy: one point of masking, or the property is
+        four parsers' memory again."""
+        result = extract(
+            "PKR 1,000.00 sent to EXAMPLE PAYEE HBL-1234567890123456 from your "
+            "A/C xxxxxx5602 of KHAYABAN-E-SEHAR KHI on 19-Sep-23 at 10:01 "
+            "Bal: PKR 1.00"
+        )
+
+        self.assertEqual(result.txn.vendor, "EXAMPLE PAYEE HBL-1234567890123456")
+
+    def test_the_mask_keeps_the_runs_length_and_the_threshold_is_ten(self):
+        """The helper itself, at its edges: the length survives so a card
+        number still reads as one, and ten is the first length masked."""
+        self.assertEqual(maskAccountNumbers(""), "")
+        self.assertEqual(maskAccountNumbers("A 123456789 B"), "A 123456789 B")
+        self.assertEqual(maskAccountNumbers("A 1234567890 B"), "A xxxxxx7890 B")
+        self.assertEqual(
+            len(maskAccountNumbers("1234567890123456789")), len("1234567890123456789")
+        )
+
+    def test_no_field_of_a_parsed_report_carries_a_long_digit_run(self):
+        """The report-level form of the rule, over every template family that
+        carries a number in the corpus."""
+        bodies = [FUNDS_TRANSFER_MSG, UPPERCASE_FUNDS_TRANSFER_MSG, ACCOUNT_DEBIT_MSG]
+
+        for body in bodies:
+            with self.subTest(body=body[:30]):
+                txn = self._txn(body)
+                self.assertIsNone(self.LONG_RUN.search(txn.vendor), txn.vendor)
+                self.assertIsNone(self.LONG_RUN.search(txn.acctMask), txn.acctMask)
+
+        # and the mask fired rather than the fixtures simply carrying no numbers
+        self.assertIn("xxxx", self._txn(FUNDS_TRANSFER_MSG).vendor)
+        self.assertTrue(self._txn(FUNDS_TRANSFER_MSG).vendor.endswith("5496"))
 
 
 class TestMeznDatesAndWhitespace(unittest.TestCase):

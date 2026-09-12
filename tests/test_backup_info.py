@@ -442,6 +442,23 @@ class TestPrivacy(BackupInfoTestCase):
         self.assertNotIn(PRIVATE_SENDER, report.messageStats.senderCounts)
         self.assertEqual(report.messageStats.unknownSenders, 1)
 
+    def test_not_even_in_the_duplicate_provenance(self):
+        """The one field that used to hold one. A repeat from an unrecognised
+        sender is recorded with `-` for the sender, so the serialised report
+        -- every field of it -- is free of the string."""
+        backupPath = self._backup(
+            [
+                self._sms(PRIVATE_SENDER, "dinner at 8?"),
+                self._sms(PRIVATE_SENDER, "dinner at 8?", "Oct 2, 2023 9:58:00 PM"),
+            ]
+        )
+
+        report = SmsBackupFileParser().parse(backupPath)
+
+        self.assertEqual(report.count("DUP"), 1)
+        self.assertEqual(report.duplicates[0].sender, "-")
+        self.assertNotIn(PRIVATE_SENDER, json.dumps(report.toDict()))
+
     def test_no_output_format_prints_one(self):
         backupPath = self._standardBackup()
 
