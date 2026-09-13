@@ -919,10 +919,21 @@ def cc_spend_for_month(ctx, month, vendor, canonical_vendors, verbose):
     default=None,
     help="Only include debit transactions of this type (default: all types).",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Also show each transaction's cheque number. Blank for every "
+    "txnType but cheque_clearing. Carried in JSON and CSV too, not just "
+    "the table.",
+)
 @click.pass_context
-def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_type):
+def list_all_debit_txns(
+    ctx, from_date, to_date, vendor, canonical_vendors, txn_type, verbose
+):
     """List every Meezan account debit -- card purchases, ATM withdrawals, bill
-    payments and funds transfers.
+    payments, funds transfers and cheque clearings.
     """
     _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
@@ -935,9 +946,9 @@ def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_
     _emit(
         ctx,
         kind="debit_txns",
-        columns=machine.DEBIT_TXN_COLUMNS,
-        rows=machine.debitTxnRows(txns),
-        table=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES),
+        columns=machine.DEBIT_TXN_COLUMNS_VERBOSE if verbose else machine.DEBIT_TXN_COLUMNS,
+        rows=machine.debitTxnRows(txns, verbose),
+        table=lambda: debitTxnsTable(txns, DEBIT_TXN_TYPES, verbose),
         emptyMessage="No account debit transactions match this filter.",
         aggregate=_spendAggregate(txns, from_date, to_date, vendor),
         notice=_Notice(

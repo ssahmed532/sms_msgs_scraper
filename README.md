@@ -7,11 +7,15 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.6.0**, a minor release: `backup_info` now reports one message count and one skipped
-count per bank, the skipped counts come off the buckets that know a warning from a failure, and a
-dozen defects a user would meet are fixed — a bad option is refused before the backup is read,
-chart ticks under ten no longer repeat, and the documented sort order is now total. 2.5.2 masked
-card, account, consumer and phone numbers out of every vendor field. 2.5.0 added `backup_info` —
+**Version 2.8.0**, a minor release: `list_all_debit_txns --verbose` adds each transaction's cheque
+number -- empty for every type but `cheque_clearing` -- to the table, JSON and CSV alike. 2.7.0
+added `cheque_clearing` itself to `--txn-type`, a Meezan account debit for a cheque presented for
+clearing against the account. 2.6.0 made
+`backup_info` report one message count and one skipped count per bank, the skipped counts come off
+the buckets that know a warning from a failure, and a dozen defects a user would meet are fixed — a
+bad option is refused before the backup is read, chart ticks under ten no longer repeat, and the
+documented sort order is now total. 2.5.2 masked card, account, consumer and phone numbers out of
+every vendor field. 2.5.0 added `backup_info` —
 what the backup file itself is: its size, its SHA-256, what it declares
 it holds against what was found in it, and where its messages went. See
 [what changed](#whats-new-in-200) if you are coming from 1.x — three things behave differently for
@@ -24,7 +28,7 @@ an existing caller.
 | HBL (Habib Bank) | `4250`, `14250` | credit card |
 | Faysal Bank | `8756` | credit card |
 | Standard Chartered | `7220`, `9220` | credit card |
-| Meezan Bank | `8079`, `9779` | account debits — card purchases, ATM withdrawals, bill payments, funds transfers |
+| Meezan Bank | `8079`, `9779` | account debits — card purchases, ATM withdrawals, bill payments, funds transfers, cheque clearing |
 
 Every sender code is declared in exactly one place, `src/sms_msgs_scraper/parser/registry.py`, and
 routing, the `--bank` choices, the parse summary and the verifier all derive from it.
@@ -170,7 +174,10 @@ All commands except `cc_spend_for_month` and `backup_info` accept an inclusive d
 
 `list_all_cc_txns`, `list_all_vendors` and `monthly_cc_spending_summary` also accept
 `--bank {HBL|FBL|SCB}` (case-insensitive), and `list_all_debit_txns` accepts
-`--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}`.
+`--txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer|cheque_clearing}` and
+`--verbose` / `-v`, which adds each transaction's cheque number (empty except for
+`cheque_clearing`) to the table **and** to JSON/CSV -- unlike the summary commands' `--verbose`
+below, this one changes the row shape itself.
 
 **Every command except `backup_info`** accepts the two vendor options:
 
@@ -568,6 +575,29 @@ nothing anywhere by design.
 **Canonicalization never changes an amount, a transaction count or a total** — it only changes what
 the output calls things, and `tests/test_vendor_filter.py` pins that. It is also opt-in: without
 `--canonical-vendors`, every command reports the strings the banks sent.
+
+## What's new in 2.8.0
+
+A minor release: one new column, opt-in.
+
+- **`list_all_debit_txns --verbose`** adds the cheque number to each row -- the one further detail
+  a `cheque_clearing` transaction carries that no existing column already shows, blank for every
+  other type. Unlike the monthly summaries' `--verbose`, which only adds rows a plain listing's
+  JSON and CSV already carried either way, this one changes the row shape itself: without the flag,
+  `list_all_debit_txns` still emits exactly the six fields it always has, in every format.
+
+## What's new in 2.7.0
+
+A minor release: one new debit type, reachable only by naming it.
+
+- **`list_all_debit_txns --txn-type cheque_clearing`** reports a Meezan cheque presented for
+  clearing against the account, in either of two wordings the bank has sent: "INWARD CLEARING VIA
+  CHEQUE NO" (71 in the reference backup) and the older "DR.TRNFR chq#..." (11). This was previously
+  excluded outright, to avoid double-counting against the bank's own "received in inward clearing"
+  notice it sends *first*, for the same cheque — that notice still never becomes a transaction; it
+  carries no debit keyword and opens with "Your cheque" rather than an amount, so it also fails the
+  amount-head check every Meezan debit template requires. Every other invocation of
+  `list_all_debit_txns`, filtered or not, returns exactly what 2.6.0 returned.
 
 ## What's new in 2.6.0
 

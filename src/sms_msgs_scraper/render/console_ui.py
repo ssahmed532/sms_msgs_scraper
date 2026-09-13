@@ -268,6 +268,15 @@ def acctText(acctMask: str) -> Text:
     return Text(sanitizeField(acctMask), style="column.acct")
 
 
+def chequeNumberText(chequeNumber: str) -> Text:
+    """Render a cheque number, or the empty placeholder for every txnType but
+    CHEQUE_CLEARING, which is the only one that carries one."""
+    if not chequeNumber:
+        return Text(EMPTY_VALUE, style="column.empty")
+
+    return Text(sanitizeField(chequeNumber), style="column.acct")
+
+
 def vendorText(vendor: str) -> Text:
     """Render a vendor name.
 

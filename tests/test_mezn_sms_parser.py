@@ -42,6 +42,26 @@ UPPERCASE_FUNDS_TRANSFER_MSG = (
     "PKR 5,000.00 SENT TO JOHN DOE MBL- 01130100000267 on 19-Sep-23 at 11:36 "
     "Bal: PKR 13,811,380.62"
 )
+CHEQUE_CLEARING_INWARD_MSG = (
+    "PKR 12,000.00 INWARD CLEARING VIA CHEQUE NO: 64181500 at "
+    "KHAYABAN-E-SEHAR KHI against A/C xxxxxx5602 on 28-Sep-23 at 11:27 "
+    "Bal: PKR 13,541,842.12"
+)
+CHEQUE_CLEARING_INWARD_TITLECASE_MSG = (
+    "PKR 22,000.00 Inward Clearing VIA CHEQUE NO: 64181501 at "
+    "KHAYABAN-E-SEHAR KHI against A/C xxxxxx5602 on 12-Jun-24 at 09:15 "
+    "Bal: PKR 13,563,842.12"
+)
+CHEQUE_CLEARING_DR_TRNFR_MSG = (
+    "PKR 6,000.00 DR.TRNFR chq#87654321 from MAHMOODABAD BR KHI from A/C "
+    "xxxxxx5602 of KHAYABAN-E-SEHAR KHI on 27-Dec-23 18:35 "
+    "Bal: PKR 13,547,842.12"
+)
+CHEQUE_RECEIVED_NOTICE_MSG = (
+    "Your cheque123456789 of PKR 12,000.00 drawn on a/c xxxxxxxxxx5602 is "
+    "received in inward clearing on 26-Sep-2023 at Meezan Bank. Visit your "
+    "branch for details"
+)
 
 MEZN_SENDER = "8079"
 
@@ -88,6 +108,9 @@ class TestMeznTxnSignal(unittest.TestCase):
             ACCOUNT_DEBIT_MSG,
             FUNDS_TRANSFER_MSG,
             UPPERCASE_FUNDS_TRANSFER_MSG,
+            CHEQUE_CLEARING_INWARD_MSG,
+            CHEQUE_CLEARING_INWARD_TITLECASE_MSG,
+            CHEQUE_CLEARING_DR_TRNFR_MSG,
         ]
 
         for body in bodies:
@@ -111,16 +134,13 @@ class TestMeznTxnSignal(unittest.TestCase):
 
         self.assertFalse(MeznSmsParser.isTxnMsg(record(body)))
 
-    def test_cheque_clearing_is_out_of_scope(self):
+    def test_a_cheque_received_notice_is_not_a_debit(self):
         """Deliberately excluded, to avoid double counting against the separate
-        "cheque received" notice."""
-        body = (
-            "PKR 12,000.00 INWARD CLEARING VIA CHEQUE NO: 64181500 at "
-            "KHAYABAN-E-SEHAR KHI against A/C xxxxxx5602 on 28-Sep-23 at "
-            "11:27 Bal: PKR 13,541,842.12"
-        )
-
-        self.assertFalse(MeznSmsParser.isTxnMsg(record(body)))
+        cheque-clearing debit for the same cheque (CHEQUE_CLEARING_INWARD_MSG
+        above matches this exact cheque number and amount in the real corpus).
+        It never reaches either debit keyword, and it opens with "Your cheque"
+        rather than an amount, so it also fails the amount-head anchor."""
+        self.assertFalse(MeznSmsParser.isTxnMsg(record(CHEQUE_RECEIVED_NOTICE_MSG)))
 
     def test_an_estatement_notice_is_not_a_debit(self):
         """It contains the words "sent to"."""
@@ -168,6 +188,7 @@ class TestMeznTemplateFamilies(unittest.TestCase):
         self.assertEqual(txn.acctMask, "xxxxxx5602")
         self.assertEqual(txn.bank, "MEZN")
         self.assertEqual(txn.date, datetime(2023, 12, 11, 14, 58, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.chequeNumber, "")
 
     def test_an_atm_withdrawal(self):
         txn = self._txn(ATM_WITHDRAWAL_MSG)
@@ -240,6 +261,38 @@ class TestMeznTemplateFamilies(unittest.TestCase):
 
         self.assertEqual(txn.vendor, "L.FOODS AC# PK......2413 as RAAST payment")
         self.assertEqual(txn.acctMask, "xxxxxx5602")
+
+    def test_a_cheque_clearing_inward_debit(self):
+        txn = self._txn(CHEQUE_CLEARING_INWARD_MSG)
+
+        self.assertEqual(txn.txnType, DebitTxnType.CHEQUE_CLEARING)
+        self.assertEqual(txn.vendor, "KHAYABAN-E-SEHAR KHI")
+        self.assertEqual(txn.money, Money(Decimal("12000.00"), "PKR"))
+        self.assertEqual(txn.acctMask, "xxxxxx5602")
+        self.assertEqual(txn.date, datetime(2023, 9, 28, 11, 27, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.chequeNumber, "64181500")
+
+    def test_a_cheque_clearing_inward_debit_title_case(self):
+        """The bank's capitalization drifted from ALL-CAPS to Title Case
+        without changing the wording, the same drift the date format shows
+        elsewhere."""
+        txn = self._txn(CHEQUE_CLEARING_INWARD_TITLECASE_MSG)
+
+        self.assertEqual(txn.txnType, DebitTxnType.CHEQUE_CLEARING)
+        self.assertEqual(txn.money, Money(Decimal("22000.00"), "PKR"))
+        self.assertEqual(txn.chequeNumber, "64181501")
+
+    def test_a_cheque_clearing_dr_trnfr_debit(self):
+        """The older wording: debited through a named clearing branch, with no
+        "at" between the date and the time."""
+        txn = self._txn(CHEQUE_CLEARING_DR_TRNFR_MSG)
+
+        self.assertEqual(txn.txnType, DebitTxnType.CHEQUE_CLEARING)
+        self.assertEqual(txn.vendor, "MAHMOODABAD BR KHI")
+        self.assertEqual(txn.money, Money(Decimal("6000.00"), "PKR"))
+        self.assertEqual(txn.acctMask, "xxxxxx5602")
+        self.assertEqual(txn.date, datetime(2023, 12, 27, 18, 35, tzinfo=DEFAULT_TZ))
+        self.assertEqual(txn.chequeNumber, "87654321")
 
 
 class TestMeznVendorMasking(unittest.TestCase):
@@ -555,6 +608,22 @@ class TestMeznEndToEnd(unittest.TestCase):
         self.assertEqual(report.count("MEZN"), 2)
         self.assertEqual(report.count("OTHER"), 0)
         self.assertEqual(len(report.debitTxns), 2)
+
+    def test_a_cheque_received_notice_does_not_double_count_its_clearing_debit(self):
+        """The bank sends both messages for the same cheque -- pinned here at
+        the report level, not just the signal, because a double count is a
+        property of what reaches debitTxns, not of what merely trips a flag."""
+        report = self._parseBackup(
+            [
+                self._sms(CHEQUE_RECEIVED_NOTICE_MSG),
+                self._sms(CHEQUE_CLEARING_INWARD_MSG),
+            ]
+        )
+
+        self.assertEqual(report.count("MEZN"), 2)
+        self.assertEqual(len(report.debitTxns), 1)
+        self.assertEqual(report.debitTxns[0].txnType, DebitTxnType.CHEQUE_CLEARING)
+        self.assertEqual(report.debitTxns[0].money, Money(Decimal("12000.00"), "PKR"))
 
 
 if __name__ == "__main__":

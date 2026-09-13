@@ -221,10 +221,34 @@ class TestReleaseShape(unittest.TestCase):
         is total, an option written after FILEPATH is explained rather than
         misread as the file, and an empty backup is reported as empty. No
         existing invocation changes meaning; no amount, count or total moves.
+
+        2.7.0 is MINOR: `list_all_debit_txns --txn-type` gains
+        `cheque_clearing`, a Meezan account debit for a cheque presented for
+        clearing against the account, in either of two wordings the bank has
+        sent ("INWARD CLEARING VIA CHEQUE NO" and the older "DR.TRNFR
+        chq#..."). It was previously excluded outright, to avoid double
+        counting against the bank's own preceding "received in inward
+        clearing" notice for the same cheque; that notice still never becomes
+        a transaction; it never reaches a debit keyword and never matches the
+        amount-head anchor every Meezan debit template requires. Purely
+        additive: every existing invocation of `list_all_debit_txns` -- with
+        or without a `--txn-type` filter -- returns exactly what 2.6.0
+        returned, since the new type is reachable only by naming it.
+
+        2.8.0 is MINOR: `list_all_debit_txns` gains `--verbose` / `-v`, which
+        adds the cheque number -- empty for every txnType but
+        `cheque_clearing` -- as a column in the table and a `chequeNumber`
+        field in JSON and CSV. Unlike the monthly summaries' `--verbose`,
+        which only adds rows a plain listing's JSON and CSV already carried
+        either way, this one changes the row shape itself: a plain
+        `list_all_debit_txns` invocation, with or without `--verbose`, until
+        now always emitted the same six fields, and it still does without the
+        flag. Reachable only by naming it, so no existing invocation changes
+        meaning.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "6", "0"))
+        self.assertEqual((major, minor, patch), ("2", "8", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

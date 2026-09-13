@@ -56,8 +56,8 @@ def _ccTxnRow(txn) -> dict:
     }
 
 
-def _debitTxnRow(txn) -> dict:
-    return {
+def _debitTxnRow(txn, verbose: bool = False) -> dict:
+    row = {
         "date": txn.date.isoformat(),
         "txnType": str(txn.txnType),
         "account": txn.acctMask,
@@ -65,18 +65,24 @@ def _debitTxnRow(txn) -> dict:
         "currency": txn.money.currency,
         "amount": str(txn.money.amount),
     }
+    if verbose:
+        # Empty for every txnType but CHEQUE_CLEARING, the same as the table.
+        row["chequeNumber"] = txn.chequeNumber
+
+    return row
 
 
 CC_TXN_COLUMNS = ("date", "bank", "card", "vendor", "currency", "amount")
 DEBIT_TXN_COLUMNS = ("date", "txnType", "account", "vendor", "currency", "amount")
+DEBIT_TXN_COLUMNS_VERBOSE = DEBIT_TXN_COLUMNS + ("chequeNumber",)
 
 
 def ccTxnRows(txns) -> list:
     return [_ccTxnRow(txn) for txn in txns]
 
 
-def debitTxnRows(txns) -> list:
-    return [_debitTxnRow(txn) for txn in txns]
+def debitTxnRows(txns, verbose: bool = False) -> list:
+    return [_debitTxnRow(txn, verbose) for txn in txns]
 
 
 def monthlyRows(perMonth, perMonthCounts) -> list:

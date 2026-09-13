@@ -25,6 +25,7 @@ from sms_msgs_scraper.render.console_ui import (
     amountText,
     bankText,
     cardText,
+    chequeNumberText,
     countText,
     currencyText,
     dataTable,
@@ -92,18 +93,30 @@ def ccTxnsTable(txns):
     return table
 
 
-def debitTxnsTable(txns, txnTypes):
-    """Account debits, one row per transaction."""
+def debitTxnsTable(txns, txnTypes, verbose: bool = False):
+    """Account debits, one row per transaction.
+
+    `verbose` adds one column, the cheque number -- the one further detail a
+    CHEQUE_CLEARING txn carries that every other debit column already shows
+    for its own type (the vendor column is the ATM location, the merchant, the
+    clearing branch, depending on txnType; the cheque number has no such
+    shared column to sit in). Blank for every other txnType, which is why it
+    is opt-in rather than always shown.
+    """
+    columns = [
+        ("#", {"justify": "right"}),
+        ("Date", {"no_wrap": True}),
+        ("Type", {}),
+        ("Account", {}),
+        ("Vendor", {"overflow": "fold"}),
+        ("Cur", {}),
+        ("Amount", {"justify": "right"}),
+    ]
+    if verbose:
+        columns.append(("Cheque #", {}))
+
     table = dataTable(
-        [
-            ("#", {"justify": "right"}),
-            ("Date", {"no_wrap": True}),
-            ("Type", {}),
-            ("Account", {}),
-            ("Vendor", {"overflow": "fold"}),
-            ("Cur", {}),
-            ("Amount", {"justify": "right"}),
-        ],
+        columns,
         caption=_breakdownCaption(
             len(txns),
             "transactions",
@@ -113,7 +126,7 @@ def debitTxnsTable(txns, txnTypes):
     )
 
     for index, txn in enumerate(txns, start=1):
-        table.add_row(
+        row = [
             indexText(index),
             dateText(txn.date),
             txnTypeText(txn.txnType),
@@ -121,7 +134,11 @@ def debitTxnsTable(txns, txnTypes):
             vendorText(txn.vendor),
             currencyText(txn.money.currency),
             amountText(txn.money),
-        )
+        ]
+        if verbose:
+            row.append(chequeNumberText(txn.chequeNumber))
+
+        table.add_row(*row)
 
     return table
 

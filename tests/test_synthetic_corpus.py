@@ -49,14 +49,14 @@ class TestEnvelope(SyntheticCorpusTestCase):
     def test_the_declared_count_matches_what_the_file_holds(self):
         envelope = self.report.envelope
 
-        self.assertEqual(envelope.declared, 31)
-        self.assertEqual(envelope.actual, 31)
+        self.assertEqual(envelope.declared, 34)
+        self.assertEqual(envelope.actual, 34)
         self.assertTrue(envelope.matchesDeclared)
 
     def test_records_are_accounted_for_exactly_once(self):
         envelope = self.report.envelope
 
-        self.assertEqual(envelope.sms, 30)
+        self.assertEqual(envelope.sms, 33)
         self.assertEqual(envelope.mms, 1)
         self.assertEqual(envelope.invalid, 0)
         self.assertEqual(
@@ -70,7 +70,7 @@ class TestEnvelope(SyntheticCorpusTestCase):
         reference backup's 4,719 records as 5,040 and called its 321 nested MMS
         children malformed messages.
         """
-        self.assertEqual(self.report.envelope.actual, 31)
+        self.assertEqual(self.report.envelope.actual, 34)
 
 
 class TestRoutingAndConservation(SyntheticCorpusTestCase):
@@ -81,7 +81,7 @@ class TestRoutingAndConservation(SyntheticCorpusTestCase):
         )
 
     def test_the_per_bank_message_counts(self):
-        expected = {"HBL": 7, "FBL": 6, "SCB": 6, "MEZN": 8, "OTHER": 1, "DUP": 2}
+        expected = {"HBL": 7, "FBL": 6, "SCB": 6, "MEZN": 11, "OTHER": 1, "DUP": 2}
 
         for bucket, count in expected.items():
             with self.subTest(bucket=bucket):
@@ -92,9 +92,11 @@ class TestRoutingAndConservation(SyntheticCorpusTestCase):
 
         Derived from the fixture: 4250 carries six messages of which one is an
         exact repeat, so five survive deduplication; 14250 two; 8756 six; 7220
-        four; 9220 two; 8079 seven; 9779 one. The unregistered 99999 sends two,
-        one of them a repeat, leaving one -- and its `<mms>` element and that
-        element's nested `<addr>` carry the same address without being
+        four; 9220 two; 8079 ten (the original seven plus a cheque-clearing
+        debit, its older-wording twin, and the bank's "received" pre-notice
+        for the first of those two); 9779 one. The unregistered 99999 sends
+        two, one of them a repeat, leaving one -- and its `<mms>` element and
+        that element's nested `<addr>` carry the same address without being
         messages, which is why a grep of the fixture finds four.
 
         These have to sum back to the per-bank counts above. A short code that
@@ -108,7 +110,7 @@ class TestRoutingAndConservation(SyntheticCorpusTestCase):
             "8756": 6,
             "7220": 4,
             "9220": 2,
-            "8079": 7,
+            "8079": 10,
             "9779": 1,
         }
 
@@ -177,7 +179,7 @@ class TestExtraction(SyntheticCorpusTestCase):
         )
 
     def test_every_debit_type_is_represented(self):
-        self.assertEqual(len(self.report.debitTxns), 6)
+        self.assertEqual(len(self.report.debitTxns), 8)
         self.assertEqual(
             Counter(str(txn.txnType) for txn in self.report.debitTxns),
             Counter(
@@ -186,6 +188,7 @@ class TestExtraction(SyntheticCorpusTestCase):
                     "atm_withdrawal": 2,
                     "account_debit": 1,
                     "funds_transfer": 2,
+                    "cheque_clearing": 2,
                 }
             ),
         )
@@ -236,7 +239,7 @@ class TestExactTotals(SyntheticCorpusTestCase):
             ("FBL", "USD"): Decimal("39.99"),
             ("FBL", "CAD"): Decimal("12.50"),
             ("SCB", "PKR"): Decimal("16550.90"),
-            ("MEZN", "PKR"): Decimal("187351.00"),
+            ("MEZN", "PKR"): Decimal("197351.00"),
         }
 
         self.assertEqual(self._totals(), expected)

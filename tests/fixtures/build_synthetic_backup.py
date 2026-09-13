@@ -238,6 +238,33 @@ MESSAGES = [
         "Bal: PKR 13,312,669.35",
         "Nov 14, 2023 5:43:00 PM",
     ),
+    (
+        # a cheque presented for clearing against this account -- a debit
+        "8079",
+        "PKR 4,000.00 INWARD CLEARING VIA CHEQUE NO: 64181500 at "
+        "SYNTHETIC BRANCH KHI against A/C xxxxxx5602 on 15-Oct-23 at 11:00 "
+        "Bal: PKR 13,308,669.35",
+        "Oct 15, 2023 11:00:00 AM",
+    ),
+    (
+        # the older cheque-clearing wording: a named clearing branch, and no
+        # "at" between the date and the time
+        "8079",
+        "PKR 6,000.00 DR.TRNFR chq#87654321 from SYNTHETIC CLEARING BR from "
+        "A/C xxxxxx5602 of SYNTHETIC BRANCH KHI on 16-Oct-23 11:15 "
+        "Bal: PKR 13,302,669.35",
+        "Oct 16, 2023 11:15:00 AM",
+    ),
+    (
+        # the bank's own preceding "received" notice for the cheque above --
+        # informational, and must not also be counted as a debit or the two
+        # messages would double-count one cheque
+        "8079",
+        "Your cheque123456789 of PKR 4,000.00 drawn on a/c xxxxxxxxxx5602 is "
+        "received in inward clearing on 14-Oct-2023 at Meezan Bank. Visit "
+        "your branch for details",
+        "Oct 14, 2023 9:00:00 AM",
+    ),
     # --------------------------------------------------------------- MEZN 9779
     (
         # the second Meezan short code, and the 4-digit-year date format

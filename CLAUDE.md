@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.6.0.
+**Version:** 2.8.0.
 
 ### Semantic versioning is mandatory
 
@@ -110,14 +110,21 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #   --bank {HBL|FBL|SCB}           - case-insensitive; default all
 #
 # list_all_debit_txns also accepts:
-#   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer}
+#   --txn-type {card_purchase|atm_withdrawal|account_debit|funds_transfer|cheque_clearing}
+#   --verbose / -v                 - also carry each txn's cheque number (empty
+#                                    for every txnType but cheque_clearing).
+#                                    Unlike the two flags below, this changes
+#                                    the JSON/CSV row shape too, not just the
+#                                    table: a plain listing carries no
+#                                    chequeNumber field at all.
 #
 # ALL SEVEN TXN COMMANDS accept the vendor pair:
 #   --vendor TEXT                  - case-insensitive substring, matched against
 #                                    the vendor as sent AND its canonical name
 #   --canonical-vendors            - report vendors under their canonical names
 #
-# Both monthly summary commands and cc_spend_for_month accept --verbose / -v.
+# Both monthly summary commands and cc_spend_for_month accept --verbose / -v,
+# table-only there: JSON and CSV carry the summary's own rows either way.
 #
 # monthly_vendor_chart also accepts:
 #   --group-by {vendor|bank|txn-type|none}   - what each bar is split into;
@@ -165,6 +172,7 @@ uv run sms-txn backup.xml list_all_cc_txns --from-date 2024-01-01 --to-date 2024
 uv run sms-txn backup.xml list_all_cc_txns --bank FBL
 uv run sms-txn backup.xml cc_spend_for_month --month 2025-03
 uv run sms-txn --format csv backup.xml list_all_debit_txns --txn-type atm_withdrawal > atm.csv
+uv run sms-txn backup.xml list_all_debit_txns --txn-type cheque_clearing --verbose
 uv run sms-txn backup.xml list_all_cc_txns --vendor PSO
 uv run sms-txn backup.xml monthly_cc_spending_summary --vendor PSO --canonical-vendors
 uv run sms-txn backup.xml monthly_vendor_chart --vendor "KE xxxxxxxxx0001" --from-date 2025-01-01
@@ -671,14 +679,14 @@ raw-corpus grep will always be higher and is not comparable.
 | `ccTxns` total | 1,696 |
 | CC txns HBL / FBL / SCB | 717 / 583 / 396 |
 | skipped HBL / FBL / SCB / MEZN | 0 / 0 / 26 / 0 |
-| `debitTxns` total | 875 |
-| debit card_purchase / atm_withdrawal / account_debit / funds_transfer | 8 / 361 / 96 / 410 |
-| unique vendors HBL / FBL / SCB / MEZN | 180 / 166 / 96 / 188 |
+| `debitTxns` total | 957 |
+| debit card_purchase / atm_withdrawal / account_debit / funds_transfer / cheque_clearing | 8 / 361 / 96 / 410 / 82 |
+| unique vendors HBL / FBL / SCB / MEZN | 180 / 166 / 96 / 191 |
 | unique CC vendor union (HBL ∪ FBL ∪ SCB) | 359 |
 | FBL currency split PKR / USD / CAD | 574 / 8 / 1 |
 | ambiguous duplicates | 5 |
 | `vendor_aliases.local.json` aliases / canonical names | 68 / 57 |
-| raw vendor strings (CC ∪ debit) → canonical | 544 → 431 |
+| raw vendor strings (CC ∪ debit) → canonical | 547 → 434 |
 | raw vendor strings won by an alias | 169 |
 | unique CC vendors under `--canonical-vendors` | 271 |
 
@@ -702,7 +710,7 @@ Exact totals (`Decimal`, asserted by the verifier):
 | FBL / USD | 603.00 |
 | FBL / CAD | 2.00 |
 | SCB / PKR | 2,918,984.99 |
-| MEZN / PKR | 37,034,319.58 |
+| MEZN / PKR | 47,755,957.58 |
 
 **Derivation of the changes from 1.1.0.** Declaring SCB's second short code `9220` moved 27 msgs
 from `OTHER` to `SCB` (1,116 → 1,089 and 614 → 641) and added 18 CC txns (1,678 → 1,696; SCB
@@ -743,6 +751,20 @@ one claimed string behind it. The three private prefixes written with a trailing
 payment aggregator and a university) were extended into the masked consumer-number run that always
 follows them (`KE xxxxxxxxx`, and the like), which changed no count: each still wins exactly the
 6, 4 and 3 strings it won before.
+
+**Derivation of the changes in 2.7.0.** Meezan cheque-clearing debits, previously excluded
+outright, are now parsed as `cheque_clearing` — 82 txns, PKR 10,721,638.00, read off two wordings
+the bank has sent for the same kind of debit: 71 "INWARD CLEARING VIA CHEQUE NO" (capitalization
+drifted from ALL-CAPS to Title Case partway through, the same drift the date format shows
+elsewhere) and 11 of the older "DR.TRNFR chq#...". Both are debits against the account, independent
+of each other (no shared cheque number or amount within a wide window) and independent of the
+bank's own "received in inward clearing" pre-notice for the same cheque, which correlates 1:1 by
+amount with the first family and stays excluded for exactly that reason — parsing it too would
+double the cheque's spending. `debitTxns` moves 875 → 957, `MEZN`'s exact PKR total moves by the
+same 10,721,638.00, and the unique-MEZN-vendor and raw-vendor-strings rows each move by 3: the two
+templates' 5 distinct clearing-branch names, less the 2 (`KHAYABAN-E-SEHAR KHI`,
+`KHADDA MARKET BR KHI`) already vendors of some other Meezan debit type. None of them are claimed by
+any alias, so **raw vendor strings won by an alias** (169) and every CC-side figure are unchanged.
 
 The 26 SCB skips are the bank's own malformed msgs: 21 truncated mid-body and 5 carrying a literal
 `PKR .00`. They are expected, not a defect.
@@ -789,8 +811,11 @@ record the derivation.** Never quietly edit this table to match observed output.
   vendor exists in the corpus; the split rule is pinned by unit tests on the known shapes.
 - **FBL comma-grouped amounts are refused.** FBL has never sent one, so a comma in an FBL amount is
   a template change worth reporting rather than an amount worth trusting. It lands in `FBL_SKIPPED`.
-- **Meezan cheque-clearing debits are deliberately out of scope** — they risk double-counting
-  against the separate "cheque received" notice.
+- **Meezan's "received in inward clearing" notice is deliberately never a transaction.** The bank
+  sends it *before* the cheque-clearing debit itself, for the same cheque, so parsing both would
+  double-count one cheque as two. It carries no keyword either cheque-clearing template does, and
+  separately opens with "Your cheque" rather than an amount, so it also fails the amount-head anchor
+  every Meezan debit template requires — two independent reasons it cannot pass `isTxnMsg`.
 - **A chart shows at most four named series.** Everything past the fourth becomes `Other`, chosen
   by amount within a single currency and by share of the chart across several. The exact figures
   for every series are always in the machine formats, which never fold — so the cap costs a reader

@@ -1,6 +1,6 @@
 """Meezan Bank account debit alerts.
 
-Five template families, matched in order, mapping onto four kinds of debit.
+Seven template families, matched in order, mapping onto five kinds of debit.
 """
 
 import re
@@ -27,6 +27,13 @@ class MeznSmsParser:
     MEZN_DATE_RE = (
         r"on (?P<txndate>\d{1,2}-[A-Za-z]{3}-(?:\d{4}|\d{2})) "
         r"at (?P<txntime>\d{1,2}:\d{2})"
+    )
+    # The cheque-clearing "DR.TRNFR" family carries the same date+time shape
+    # but with no "at" between them -- the one place in the corpus that
+    # separator is missing.
+    MEZN_DATE_NO_AT_RE = (
+        r"on (?P<txndate>\d{1,2}-[A-Za-z]{3}-(?:\d{4}|\d{2})) "
+        r"(?P<txntime>\d{1,2}:\d{2})"
     )
 
     # The five validated debit templates, as (txn type, pattern) pairs matched
@@ -88,6 +95,34 @@ class MeznSmsParser:
             DebitTxnType.FUNDS_TRANSFER,
             re.compile(MEZN_AMOUNT_RE + r" SENT TO (?P<vendor>.+?) " + MEZN_DATE_RE),
         ),
+        (
+            # A cheque someone deposited elsewhere, presented for clearing
+            # against this account -- a debit, not the informational "received
+            # in inward clearing" notice the bank sends first for the same
+            # cheque (see MEZN_NON_DEBIT_KEYWORDS below for why that notice
+            # stays excluded). "Inward Clearing" is matched case-insensitively:
+            # the corpus carries it both ALL-CAPS and Title Case, the same
+            # capitalization drift the date format already shows elsewhere.
+            DebitTxnType.CHEQUE_CLEARING,
+            re.compile(
+                MEZN_AMOUNT_RE
+                + r"(?i: Inward Clearing VIA CHEQUE NO: )(?P<chqno>\S+) at "
+                + r"(?P<vendor>.+?) against A/C (?P<acmask>\S+) "
+                + MEZN_DATE_RE
+            ),
+        ),
+        (
+            # An older cheque-clearing wording, debited through a named
+            # clearing branch rather than "against" the account directly. Its
+            # date+time carries no "at" separator, unlike every other family.
+            DebitTxnType.CHEQUE_CLEARING,
+            re.compile(
+                MEZN_AMOUNT_RE
+                + r" DR\.TRNFR chq#(?P<chqno>\S+) from (?P<vendor>.+?) "
+                + r"from A/C (?P<acmask>\S+) of .+? "
+                + MEZN_DATE_NO_AT_RE
+            ),
+        ),
     ]
 
     # The amount head every debit alert opens with. Load-bearing part of the
@@ -109,8 +144,17 @@ class MeznSmsParser:
         "is debited as",
         "sent to",
         "for card used",
+        "inward clearing via cheque",
+        "dr.trnfr",
     )
-    MEZN_NON_DEBIT_KEYWORDS = ("credited", "received from", "cheque", "reversal")
+    # "cheque" itself is deliberately not here: the bank's "received in inward
+    # clearing" notice for the *same* cheque (Your cheque######### of PKR
+    # ##.## drawn on a/c ... is received in inward clearing on ...) would
+    # double-count the debit above if it were also parsed. It never reaches
+    # either debit keyword, and separately never matches
+    # MEZN_AMOUNT_HEAD_PTTRN -- it opens with "Your cheque", not an amount --
+    # so it stays excluded without needing an entry here.
+    MEZN_NON_DEBIT_KEYWORDS = ("credited", "received from", "reversal")
 
     # The formats of the txn date+time in Meezan debit SMS msgs:
     #   28-Sep-23 19:42     (2-digit year; the original format)
@@ -222,6 +266,8 @@ class MeznSmsParser:
 
             # The uppercase transfer template has no account clause at all.
             acctMask = m.group("acmask").strip() if "acmask" in m.groupdict() else ""
+            # Only the two cheque-clearing templates carry a cheque number.
+            chequeNumber = m.group("chqno").strip() if "chqno" in m.groupdict() else ""
 
             return ParseResult.ok(
                 DebitTxnDC(
@@ -230,6 +276,7 @@ class MeznSmsParser:
                     vendor=vendor,
                     txnType=txnType,
                     acctMask=acctMask,
+                    chequeNumber=chequeNumber,
                 )
             )
 

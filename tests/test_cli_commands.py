@@ -46,6 +46,11 @@ MEZN_ATM_BODY = (
     "PKR 20,000.00 cash withdrawn from MEEZAN ATM DHA PHASE 6 from A/C "
     "xxxxxx5602 KARACHI BRANCH on 15-Jun-24 at 09:05 Bal: PKR 1,234.00"
 )
+MEZN_CHEQUE_CLEARING_BODY = (
+    "PKR 12,000.00 INWARD CLEARING VIA CHEQUE NO: 64181500 at "
+    "KHAYABAN-E-SEHAR KHI against A/C xxxxxx5602 on 28-Sep-23 at 11:27 "
+    "Bal: PKR 13,541,842.12"
+)
 
 
 class CliTestCase(unittest.TestCase):
@@ -136,7 +141,13 @@ class TestCommandRegistration(CliTestCase):
 
         self.assertEqual(
             set(option.type.choices),
-            {"card_purchase", "atm_withdrawal", "account_debit", "funds_transfer"},
+            {
+                "card_purchase",
+                "atm_withdrawal",
+                "account_debit",
+                "funds_transfer",
+                "cheque_clearing",
+            },
         )
 
 
@@ -661,6 +672,70 @@ class TestTableRendering(CliTestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("MEEZAN ATM DHA PHASE 6", result.stdout)
+
+    def test_the_debit_listing_omits_the_cheque_number_by_default(self):
+        backupPath = self._backup(
+            [self._sms("8079", MEZN_CHEQUE_CLEARING_BODY, "Sep 28, 2023 11:27:00 AM")]
+        )
+
+        result = self.run_cli([str(backupPath), "list_all_debit_txns"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn("Cheque #", result.stdout)
+        self.assertNotIn("64181500", result.stdout)
+
+    def test_verbose_adds_the_cheque_number_to_the_table(self):
+        """A non-cheque debit alongside it renders the empty placeholder in
+        that column rather than a blank cell or a stray value."""
+        backupPath = self._backup(
+            [
+                self._sms(
+                    "8079", MEZN_CHEQUE_CLEARING_BODY, "Sep 28, 2023 11:27:00 AM"
+                ),
+                self._sms("8079", MEZN_ATM_BODY, "Jun 15, 2024 9:05:00 AM"),
+            ]
+        )
+
+        result = self.run_cli(
+            [str(backupPath), "list_all_debit_txns", "--verbose"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Cheque #", result.stdout)
+        self.assertIn("64181500", result.stdout)
+        self.assertIn("MEEZAN ATM DHA PHASE 6", result.stdout)
+
+    def test_verbose_adds_the_cheque_number_to_json_and_csv(self):
+        backupPath = self._backup(
+            [self._sms("8079", MEZN_CHEQUE_CLEARING_BODY, "Sep 28, 2023 11:27:00 AM")]
+        )
+
+        asJson = self.run_cli(
+            ["--format", "json", str(backupPath), "list_all_debit_txns", "--verbose"]
+        )
+        row = json.loads(asJson.stdout)["rows"][0]
+        self.assertEqual(row["chequeNumber"], "64181500")
+
+        asCsv = self.run_cli(
+            ["--format", "csv", str(backupPath), "list_all_debit_txns", "--verbose"]
+        )
+        reader = csv.DictReader(io.StringIO(asCsv.stdout))
+        self.assertEqual(next(reader)["chequeNumber"], "64181500")
+
+    def test_without_verbose_json_carries_no_cheque_number_field(self):
+        """The flag changes the row shape itself, not just the table -- unlike
+        a summary's --verbose, which only adds rows the JSON already carried
+        either way."""
+        backupPath = self._backup(
+            [self._sms("8079", MEZN_CHEQUE_CLEARING_BODY, "Sep 28, 2023 11:27:00 AM")]
+        )
+
+        result = self.run_cli(
+            ["--format", "json", str(backupPath), "list_all_debit_txns"]
+        )
+
+        row = json.loads(result.stdout)["rows"][0]
+        self.assertNotIn("chequeNumber", row)
 
     def test_the_monthly_debit_summary_renders(self):
         result = self.run_cli(

@@ -104,10 +104,12 @@ DISCOVERY_ALLOWLIST: dict[str, str] = {}
 
 # Derived 2026-08-29 from the reference backup, after Standard Chartered's
 # second short code (9220) was declared; the per-sender rows, the ambiguous
-# duplicate count and the Meezan vendor count re-derived 2026-09-12 (see the
-# Reference numbers table in CLAUDE.md for each derivation). The message counts
-# are *post-dedup* runtime values: the parser dedups before parsing, so grepping
-# the raw XML gives higher numbers for every bank and is not comparable.
+# duplicate count and the Meezan vendor count re-derived 2026-09-12; the
+# debit and Meezan-vendor rows re-derived again 2026-09-13 after
+# cheque-clearing debits were added (see the Reference numbers table in
+# CLAUDE.md for each derivation). The message counts are *post-dedup* runtime
+# values: the parser dedups before parsing, so grepping the raw XML gives
+# higher numbers for every bank and is not comparable.
 EXPECTED = {
     # envelope: what the file declared, against what it held
     "envelope_declared": 4719,
@@ -149,21 +151,32 @@ EXPECTED = {
     "ccTxns_FBL": 583,
     "ccTxns_SCB": 396,
     # account debit txns
-    "debitTxns": 875,
+    "debitTxns": 957,
     "debit_card_purchase": 8,
     "debit_atm_withdrawal": 361,
     "debit_account_debit": 96,
     "debit_funds_transfer": 410,
+    # Cheque-clearing debits, added in 2.7.0: a cheque presented against this
+    # account, in either of two wordings the bank has sent ("INWARD CLEARING
+    # VIA CHEQUE NO" and the older "DR.TRNFR chq#..."). The informational
+    # "received in inward clearing" notice the bank sends first for the same
+    # cheque is deliberately not one of these 82 -- it never reaches a debit
+    # keyword and never matches the amount-head anchor, so counting it too
+    # would double the cheque's spending.
+    "debit_cheque_clearing": 82,
     # Vendor counts are the tripwire for a broken extraction rule: a build can
     # hit every txn count above while extracting garbage vendors, since a set of
-    # empty strings still counts as one vendor. MEZN is 188 rather than the 189
-    # raw spellings because any run of ten or more digits is masked to its last
-    # four as the report is assembled, and two gas-bill strings differing only
-    # in a consumer number with the same last four collapse into one.
+    # empty strings still counts as one vendor. MEZN is 191: 188 plus 3 of the
+    # 82 cheque-clearing txns' 5 distinct clearing-branch names, the other 2
+    # (KHAYABAN-E-SEHAR KHI, KHADDA MARKET BR KHI) already being vendors of
+    # some other debit type. Also because any run of ten or more digits is
+    # masked to its last four as the report is assembled, and two gas-bill
+    # strings differing only in a consumer number with the same last four
+    # collapse into one.
     "vendors_HBL": 180,
     "vendors_FBL": 166,
     "vendors_SCB": 96,
-    "vendors_MEZN": 188,
+    "vendors_MEZN": 191,
     "vendors_cc_all": 359,
     # FBL is the only bank in the corpus sending more than one currency
     "fbl_pkr": 574,
@@ -193,7 +206,7 @@ EXPECTED_TOTALS = {
     ("FBL", "USD"): Decimal("603.00"),
     ("FBL", "CAD"): Decimal("2.00"),
     ("SCB", "PKR"): Decimal("2918984.99"),
-    ("MEZN", "PKR"): Decimal("37034319.58"),
+    ("MEZN", "PKR"): Decimal("47755957.58"),
 }
 
 # What the private alias table does to the reference backup, asserted only when
@@ -208,9 +221,9 @@ EXPECTED_TOTALS = {
 EXPECTED_VENDOR_MAP = {
     "aliases": 68,
     "canonical_names": 57,
-    "raw_vendors": 544,
+    "raw_vendors": 547,
     "claimed_vendors": 169,
-    "after_canonicalization": 431,
+    "after_canonicalization": 434,
 }
 
 # The spending that declaring SCB's second short code recovered. Independently
@@ -220,7 +233,13 @@ EXPECTED_RECOVERED_TOTAL = Decimal("94294.32")
 EXPECTED_RECOVERED_TXNS = 18
 
 MSG_BUCKETS = ("HBL", "FBL", "SCB", "MEZN", "OTHER", "DUP")
-DEBIT_TXN_TYPES = ("card_purchase", "atm_withdrawal", "account_debit", "funds_transfer")
+DEBIT_TXN_TYPES = (
+    "card_purchase",
+    "atm_withdrawal",
+    "account_debit",
+    "funds_transfer",
+    "cheque_clearing",
+)
 
 
 def fileSha256(path: Path) -> str:
@@ -456,6 +475,14 @@ def checkInvariants(report, metrics: dict) -> list:
     check(
         "debit txnType is a known type",
         lambda t: str(t.txnType) in DEBIT_TXN_TYPES,
+        report.debitTxns,
+    )
+    # A cheque number is the one detail only CHEQUE_CLEARING carries -- this
+    # would catch either a regex that stopped capturing it, or one that
+    # started leaking a reference number into some other txnType.
+    check(
+        "cheque number present iff cheque_clearing",
+        lambda t: bool(t.chequeNumber) == (str(t.txnType) == "cheque_clearing"),
         report.debitTxns,
     )
 

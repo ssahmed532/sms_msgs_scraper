@@ -15,6 +15,7 @@ class DebitTxnType(StrEnum):
     ATM_WITHDRAWAL = auto()
     ACCOUNT_DEBIT = auto()
     FUNDS_TRANSFER = auto()
+    CHEQUE_CLEARING = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,13 +29,16 @@ class DebitTxnDC:
 
     money: Money
     date: datetime
-    # merchant name / ATM location / bill description / transfer payee,
-    # depending on txnType
+    # merchant name / ATM location / bill description / transfer payee /
+    # clearing branch, depending on txnType
     vendor: str
     txnType: DebitTxnType
     # e.g. "xxxxxx5602"; empty when the message carries no account number
     acctMask: str = ""
     bank: str = "MEZN"
+    # the cheque's own number, e.g. "64181500"; only CHEQUE_CLEARING carries
+    # one, empty for every other txnType
+    chequeNumber: str = ""
 
     def __post_init__(self) -> None:
         if not self.money.isPositive:
@@ -66,6 +70,7 @@ class DebitTxnDC:
             "vendor": self.vendor,
             "txnType": str(self.txnType),
             "acctMask": self.acctMask,
+            "chequeNumber": self.chequeNumber,
         }
 
     @classmethod
@@ -77,4 +82,5 @@ class DebitTxnDC:
             txnType=DebitTxnType(data["txnType"]),
             acctMask=data.get("acctMask", ""),
             bank=data.get("bank", "MEZN"),
+            chequeNumber=data.get("chequeNumber", ""),
         )
