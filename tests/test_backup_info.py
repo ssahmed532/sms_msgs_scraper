@@ -52,6 +52,14 @@ MEZN_ATM_BODY = (
     "xxxxxx5602 KARACHI BRANCH on 15-Jun-24 at 09:05 Bal: PKR 1,234.00"
 )
 SCB_TRUNCATED_BODY = "Dear Client, PKR 281.00 have been paid at NECOS NATURAL STORE "
+# A complete alert whose card mask is in a shape neither known form covers:
+# the transaction is kept and the mask is reported, so this is a diagnostic
+# that is not a skip.
+SCB_ODD_MASK_BODY = (
+    "Dear Client, PKR 12,450.90 have been paid at PSO SERVICE STATION 7Karachi "
+    "PAK on 29-09-23 using Credit Card no 5452xxxx12. Avail Limit "
+    "PKR59563.45. SCBPL"
+)
 
 # A sender no bank claims, standing in for the personal phone number a real
 # backup is mostly made of. No output may ever contain it.
@@ -176,11 +184,22 @@ class TestFileMetadata(BackupInfoTestCase):
 
     def test_the_modified_time_is_converted_into_asia_karachi(self):
         """Converted, not stamped: `st_mtime` is an absolute instant, unlike
-        the naive wall-clock dates parsed out of a message body."""
-        info = BackupFileInfo.forPath(self._standardBackup())
+        the naive wall-clock dates parsed out of a message body.
+
+        The instant itself is asserted, not only the zone. A return to
+        stamping would still carry Asia/Karachi, and on a host already set to
+        +05:00 it would even carry the right instant -- so this can only fail
+        elsewhere, but the tzinfo check alone could not fail anywhere."""
+        backupPath = self._standardBackup()
+        info = BackupFileInfo.forPath(backupPath)
 
         self.assertIsNotNone(info.modifiedAt.tzinfo)
         self.assertEqual(str(info.modifiedAt.tzinfo), "Asia/Karachi")
+        # to the millisecond: fromtimestamp keeps microseconds, st_mtime has
+        # nanoseconds, and the two are otherwise the same instant
+        self.assertAlmostEqual(
+            info.modifiedAt.timestamp(), backupPath.stat().st_mtime, places=3
+        )
 
     def test_a_relative_path_reports_its_resolved_folder(self):
         """The folder used to come out as `.`, which identifies nothing once
@@ -349,17 +368,17 @@ class TestVerboseStats(BackupInfoTestCase):
         self.assertIn(f" {expected} ", footer)
         self.assertNotEqual(expected, report.count("ALL"))
 
-    def test_parse_failures_are_broken_down_by_bank_and_reason(self):
+    def test_diagnostics_are_broken_down_by_bank_and_reason(self):
         rows = self.rowsFrom(self._standardBackup(), extra=["--verbose"])
-        failures = [row for row in rows if row["section"] == "parseFailures"]
+        diagnostics = [row for row in rows if row["section"] == "diagnostics"]
 
-        self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0]["field"], "SCB")
-        self.assertEqual(failures[0]["value"], 1)
-        self.assertEqual(failures[0]["note"], "no_template_match")
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["field"], "SCB")
+        self.assertEqual(diagnostics[0]["value"], 1)
+        self.assertEqual(diagnostics[0]["note"], "no_template_match")
 
-    def test_a_clean_run_shows_no_parse_failures_table_at_all(self):
-        """An empty failures table reads as a table that failed to populate
+    def test_a_clean_run_shows_no_diagnostics_table_at_all(self):
+        """An empty diagnostics table reads as a table that failed to populate
         rather than as a run with nothing to report.
         """
         clean = self._backup([self._sms("4250", HBL_TXN_BODY)])
@@ -369,7 +388,60 @@ class TestVerboseStats(BackupInfoTestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Senders", result.stdout)
         self.assertIn("Duplicates", result.stdout)
-        self.assertNotIn("Parse failures", result.stdout)
+        self.assertNotIn("Diagnostics", result.stdout)
+
+    def test_a_warning_is_a_diagnostic_and_not_a_skip(self):
+        """The distinction the old "Parse failures" label erased.
+
+        An SCB alert with a card mask in a shape neither known form covers
+        keeps its transaction and is reported. It is a diagnostic; it is not
+        a skipped message, and the skipped count comes off the bucket that
+        knows the difference. The two numbers coincide on the reference
+        backup, which is how the mislabelling survived two releases.
+        """
+        backupPath = self._backup([self._sms("7220", SCB_ODD_MASK_BODY)])
+
+        rows = self.rowsFrom(backupPath, extra=["--verbose"])
+
+        self.assertEqual(self.valueOf(rows, "transactions", "ccTxns"), 1)
+        self.assertEqual(self.valueOf(rows, "skipped", "SCB"), 0)
+        self.assertEqual(self.valueOf(rows, "diagnostics", "SCB"), 1)
+        self.assertEqual(
+            next(row for row in rows if row["section"] == "diagnostics")["note"],
+            "unrecognized_card_mask",
+        )
+
+    def test_the_skipped_rows_come_off_the_buckets_for_every_bank(self):
+        """One row per bank in the default output, zeros included -- the
+        same argument the sender table makes for a short code at zero."""
+        rows = self.rowsFrom(self._standardBackup())
+        skipped = {
+            row["field"]: row["value"] for row in rows if row["section"] == "skipped"
+        }
+
+        self.assertEqual(skipped, {"HBL": 0, "FBL": 0, "SCB": 1, "MEZN": 0})
+
+    def test_the_message_rows_carry_one_count_per_bank(self):
+        rows = self.rowsFrom(self._standardBackup())
+        messages = {
+            row["field"]: row["value"] for row in rows if row["section"] == "messages"
+        }
+
+        self.assertEqual(messages["HBL"], 2)
+        self.assertEqual(messages["FBL"], 1)
+        self.assertEqual(messages["SCB"], 1)
+        self.assertEqual(messages["MEZN"], 1)
+        self.assertEqual(
+            messages["HBL"] + messages["FBL"] + messages["SCB"] + messages["MEZN"],
+            messages["fromBank"],
+        )
+
+    def test_the_table_shows_the_skipped_and_per_bank_counts_too(self):
+        result = self.run_cli(["--quiet", str(self._standardBackup()), "backup_info"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Skipped", result.stdout)
+        self.assertIn("from HBL", result.stdout)
 
     def test_the_duplicate_rows_say_how_much_was_a_judgement_call(self):
         rows = self.rowsFrom(self._standardBackup(), extra=["--verbose"])

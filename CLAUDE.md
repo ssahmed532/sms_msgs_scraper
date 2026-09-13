@@ -16,7 +16,7 @@ so the CC commands report them together and `--bank` splits them apart. Meezan a
 different kind of transaction (card purchases, ATM withdrawals, bill payments, funds transfers) and
 live in their own store (`debitTxns`) with their own two commands.
 
-**Version:** 2.5.2.
+**Version:** 2.6.0.
 
 ### Semantic versioning is mandatory
 
@@ -124,9 +124,16 @@ uv run sms-txn [GLOBAL OPTIONS] <path_to_sms_backup.xml> <command> [OPTIONS]
 #                                              default vendor
 #
 # backup_info takes NONE of the above -- no date range, no vendor pair, no
-# bank. It describes the file, and a file does not have a date range. Its only
-# option is --verbose / -v, which adds the per-sender, per-skip-reason and
-# per-duplicate breakdowns behind the counts it already prints.
+# bank. It describes the file, and a file does not have a date range. Its
+# default output carries one message count and one SKIPPED count per bank,
+# zeros included. Its only option is --verbose / -v, which adds the
+# per-sender, per-diagnostic-reason and per-duplicate breakdowns behind the
+# counts it already prints.
+#
+# An inverted date range, an empty --vendor and a --vendor-map that exists but
+# does not load are refused BEFORE the backup is read, like every other bad
+# option. A global option written after FILEPATH is reported as "not a
+# command", with where the options go, rather than misread as the file.
 #
 # When list_all_cc_txns or list_all_debit_txns is given a date range and/or
 # --vendor, its table output also carries an "Aggregate spend" block: one
@@ -174,6 +181,12 @@ changed* from *the file changed* — two bugs that look identical in a count. `-
 breakdowns inside the counts, and the sender table is the one worth reading: a declared short code
 sitting at zero is what a bank re-homing its alerts looks like from the outside, which has caught
 this tool twice.
+
+Its **skipped** counts come off the `<ID>_SKIPPED` buckets, never off the diagnostics. A warning —
+an SCB alert whose card mask is in a shape neither known form covers — is a diagnostic that *keeps*
+its transaction, so a count of diagnostics called a parsed transaction a failure. The two coincide
+on the reference backup (26 = 26), which is what hid it until 2.6.0; the `--verbose` table that
+counts every diagnostic is titled `Diagnostics` (JSON section `diagnostics`) for the same reason.
 
 `python -m sms_msgs_scraper` is equivalent to `sms-txn` and works from a source checkout.
 
@@ -496,11 +509,17 @@ msg can only ever be suppressed by an earlier msg *from the same short code*. It
 **not** include a received timestamp — see the dedup limitations below for the measurements that
 rule both candidate timestamps out.
 
-**Output order is a contract.** Txns are sorted by `(date, bank, vendor, currency, amount)`. The
-tie-breakers make the order *total*: HBL and SCB alerts carry a date only, so a great many txns
-share midnight on the same day. The key is `txnSortKey` in `domain/aggregate.py`, not private to
-the orchestrator, because *vendor* is one of those tie-breakers: `--canonical-vendors` rewrites
-vendors and so must re-sort, or the listing silently leaves the order the tool documents.
+**Output order is a contract.** Txns are sorted by `(date, bank, vendor, currency, amount, type,
+instrument)`, where *type* is the debit type (empty for a CC txn) and *instrument* is the card's
+last four or the account mask — the two fields a listing prints that the first five do not cover.
+The tie-breakers make the order *total over every printed field*: HBL and SCB alerts carry a date
+only, so a great many txns share midnight on the same day, and until 2.6.0 two cards charged alike
+at one merchant on one day kept file order. Txns that still share the whole key are identical in
+every printed field, so their relative order cannot be observed (14 such groups of Meezan debits on
+the reference backup, told apart only by a running balance the report does not keep). The key is
+`txnSortKey` in `domain/aggregate.py`, not private to the orchestrator, because *vendor* is one of
+those tie-breakers: `--canonical-vendors` rewrites vendors and so must re-sort, or the listing
+silently leaves the order the tool documents.
 
 ### Bank Short Codes
 
@@ -660,11 +679,17 @@ raw-corpus grep will always be higher and is not comparable.
 | ambiguous duplicates | 5 |
 | `vendor_aliases.local.json` aliases / canonical names | 68 / 57 |
 | raw vendor strings (CC ∪ debit) → canonical | 544 → 431 |
+| raw vendor strings won by an alias | 169 |
 | unique CC vendors under `--canonical-vendors` | 271 |
 
-The three vendor rows describe **`vendor_aliases.local.json`**, the private table, not the packaged
+The four vendor rows describe **`vendor_aliases.local.json`**, the private table, not the packaged
 examples — which claim nothing and collapse nothing. That file is not in the repository, so these
-three are the only reference numbers a fresh clone cannot reproduce.
+four are the only reference numbers a fresh clone cannot reproduce. The **won** row is the
+over-claiming tripwire: the corpus is fixed by its digest, so the only way one more raw string can
+come under an alias is the table or the code changing, and a merchant that merely starts with the
+same word as a utility is mis-attributed spending that looks exactly like real spending. The
+verifier asserts it (`EXPECTED_VENDOR_MAP`) and prints the per-alias counts behind it — alias and
+canonical names only, never a vendor string — so when it moves, the line that moved is on screen.
 
 Exact totals (`Decimal`, asserted by the verifier):
 
@@ -706,6 +731,18 @@ recovery attributable rather than merely coincident with a rewrite.
   refuses as dead config, so the entry was removed: 69 / 58 → 68 / 57. The canonical count (431)
   and the CC vendor figures are untouched: the one CC vendor carrying a long digit run is an SCB
   descriptor with an 11-digit phone number in it (two txns, one string before and after masking).
+
+**Derivation of the changes in 2.6.0.** One row added and nothing moved. **Raw vendor strings won
+by an alias: 169**, read off the verifier's new per-alias accounting on 2026-09-13: for each of the
+544 raw strings, the alias `canonicalFor` resolves it by (an exact alias first, then the longest
+matching prefix), counted per alias and summed. 544 − 169 = 375 strings no alias claims, and
+169 claimed strings collapsing into 57 canonical names is 375 + 57 = 432 — one more than 431
+because exactly one *unclaimed* raw string is spelled the same as a canonical name (measured, not
+inferred), so the two are one string in the canonical set. Every one of the 57 names has at least
+one claimed string behind it. The three private prefixes written with a trailing space (an electricity utility, a
+payment aggregator and a university) were extended into the masked consumer-number run that always
+follows them (`KE xxxxxxxxx`, and the like), which changed no count: each still wins exactly the
+6, 4 and 3 strings it won before.
 
 The 26 SCB skips are the bank's own malformed msgs: 21 truncated mid-body and 5 carrying a literal
 `PKR .00`. They are expected, not a defect.
@@ -757,7 +794,20 @@ record the derivation.** Never quietly edit this table to match observed output.
 - **A chart shows at most four named series.** Everything past the fourth becomes `Other`, chosen
   by amount within a single currency and by share of the chart across several. The exact figures
   for every series are always in the machine formats, which never fold — so the cap costs a reader
-  of the terminal chart resolution, and costs a program nothing.
+  of the terminal chart resolution, and costs a program nothing. The fold bucket is an object, not
+  the string `Other`, so a series that is genuinely called `Other` keeps its own slot and glyph.
+  One consequence of the cap: "colour depends only on which series exist" holds up to four series.
+  Past four, a narrower date range that changes which four are largest repaints them, because the
+  four named are chosen by size; the survivors keep their relative order.
+
+- **The chart runs from the first month with a transaction to the last**, not from `--from-date`
+  to `--to-date`. The range is a filter, and the axis covers the months that survived it, so a
+  range starting before the first transaction is not padded with empty months at the front.
+
+- **The chart needs about 56 columns.** A row is a month label, a bar of at least 20 cells, the
+  total and the change; narrower than that, every row wraps, and there is no narrower layout to
+  fall back to. The total column is sized to the widest total in the run and a change of 1000% or
+  more prints as `>999%`, so a row never grows past what it was measured for.
 
 - **A sub-cell segment usually disappears from a bar.** A series worth less than one cell at the
   chart's scale generally gets no width, so a PKR 2 charge next to a PKR 260 one has no visible

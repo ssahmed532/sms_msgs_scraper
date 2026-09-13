@@ -169,6 +169,64 @@ class TestHelpCostsNothing(CliTestCase):
         self.assertEqual(result.exit_code, 0)
 
 
+class TestValidationPrecedesTheParse(CliTestCase):
+    """The module docstring promises that argument validation completes
+    without touching the file. Click keeps that for what it can check alone;
+    these are the three it cannot, and each used to fail only after the
+    header, the parse summary and every skip warning had been printed."""
+
+    def _assertRefusedBeforeParsing(self, result, fragment):
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn(fragment, result.output)
+        self.assertNotIn("Messages parsed", result.stderr)
+        self.assertNotIn("sms_txn_query_tool", result.stderr)
+
+    def test_an_inverted_date_range_is_refused_before_the_file_is_read(self):
+        backupPath = self._standardBackup()
+        for command in (
+            ["list_all_cc_txns"],
+            ["list_all_vendors"],
+            ["monthly_cc_spending_summary"],
+            ["list_all_debit_txns"],
+            ["monthly_debit_spending_summary"],
+            ["monthly_vendor_chart"],
+        ):
+            with self.subTest(command=command[0]):
+                result = self.runner.invoke(
+                    cli,
+                    [str(backupPath), *command,
+                     "--from-date", "2024-06-30", "--to-date", "2024-04-01"],
+                )
+
+                self._assertRefusedBeforeParsing(result, "after")
+
+    def test_an_empty_vendor_needle_is_refused_before_the_file_is_read(self):
+        backupPath = self._standardBackup()
+        for command in (
+            ["list_all_cc_txns"],
+            ["cc_spend_for_month", "--month", "2023-10"],
+            ["monthly_vendor_chart"],
+        ):
+            with self.subTest(command=command[0]):
+                result = self.runner.invoke(
+                    cli, [str(backupPath), *command, "--vendor", "   "]
+                )
+
+                self._assertRefusedBeforeParsing(result, "text to match")
+
+    def test_a_global_option_after_the_filepath_is_explained_not_misread(self):
+        """Click's fallback re-parsed `--format csv list_all_vendors` as group
+        arguments, so `list_all_vendors` landed in FILEPATH and the error was
+        `File 'list_all_vendors' does not exist` -- true, and no help."""
+        result = self.runner.invoke(
+            cli, [str(self._standardBackup()), "--format", "csv", "list_all_vendors"]
+        )
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("is not a command", result.output)
+        self.assertNotIn("does not exist", result.output)
+
+
 class TestStreamContract(CliTestCase):
     """Results on stdout; everything about the run on stderr."""
 
@@ -482,6 +540,59 @@ class TestCcSpendForMonth(CliTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("No credit card transactions in 2099-01", result.stderr)
 
+    def test_an_empty_month_under_a_vendor_filter_names_the_filter(self):
+        """"No credit card transactions in 2023-10" with --vendor in force
+        read as a month with no spending, when the month was full and the
+        merchant was absent from it."""
+        result = self.run_cli(
+            [str(self._standardBackup()), "cc_spend_for_month",
+             "--month", "2023-10", "--vendor", "NOSUCH"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(
+            'No credit card transactions in 2023-10 (vendor matching "NOSUCH")',
+            result.stderr,
+        )
+
+    def test_verbose_lists_the_transactions_behind_the_total(self):
+        backupPath = self._standardBackup()
+
+        plain = self.run_cli(
+            [str(backupPath), "cc_spend_for_month", "--month", "2023-10"]
+        )
+        verbose = self.run_cli(
+            [str(backupPath), "cc_spend_for_month", "--month", "2023-10", "--verbose"]
+        )
+
+        self.assertNotIn("IMTIAZ SUPER MARKET", plain.stdout)
+        self.assertIn("IMTIAZ SUPER MARKET", verbose.stdout)
+
+    def test_csv_carries_the_monthly_summary_shape(self):
+        """One shape for every monthly command, so a consumer reads one."""
+        result = self.run_cli(
+            ["--format", "csv", str(self._sameMonthBackup()),
+             "cc_spend_for_month", "--month", "2023-09", "--verbose"]
+        )
+
+        rows = list(csv.DictReader(io.StringIO(result.stdout)))
+        self.assertEqual(list(rows[0]), ["month", "currency", "total", "txns"])
+        self.assertEqual({row["currency"] for row in rows}, {"PKR", "USD"})
+        # --verbose is table-only: the rows are the same with or without it
+        self.assertEqual(len(rows), 2)
+
+    def test_it_takes_no_bank_option(self):
+        """The month is totalled across all banks by design; the table breaks
+        it down by bank instead."""
+        result = self.runner.invoke(
+            cli,
+            [str(self._standardBackup()), "cc_spend_for_month",
+             "--month", "2023-10", "--bank", "HBL"],
+        )
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("--bank", result.output)
+
     def test_the_month_is_required(self):
         result = self.runner.invoke(
             cli, [str(self._standardBackup()), "cc_spend_for_month"]
@@ -603,6 +714,35 @@ class TestExitCodes(CliTestCase):
         )
 
         self.assertEqual(result.exit_code, 0)
+
+    def test_strict_exits_three_on_an_envelope_mismatch(self):
+        """Nothing was skipped; the file simply does not hold what it
+        declares, which is what a truncated backup looks like."""
+        backupPath = self._backup(
+            raw=(
+                "<smses count='2'>"
+                f"<sms address='4250' body=\"{HBL_TXN_BODY}\" "
+                "readable_date='Oct 2, 2023 9:57:06 PM' />"
+                "</smses>"
+            )
+        )
+
+        lenient = self.runner.invoke(cli, [str(backupPath), "list_all_cc_txns"])
+        strict = self.runner.invoke(
+            cli, ["--strict", str(backupPath), "list_all_cc_txns"]
+        )
+
+        self.assertEqual(lenient.exit_code, 0)
+        self.assertIn("declares 2 records but holds 1", lenient.stderr)
+        self.assertEqual(strict.exit_code, EXIT_STRICT_FAILURE)
+
+    def test_an_empty_file_exits_one_and_says_so(self):
+        backupPath = self._backup(raw="")
+
+        result = self.runner.invoke(cli, [str(backupPath), "list_all_cc_txns"])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("empty", result.output)
 
     def test_a_successful_run_exits_zero(self):
         result = self.run_cli([str(self._standardBackup()), "list_all_cc_txns"])

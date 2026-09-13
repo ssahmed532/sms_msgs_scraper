@@ -134,6 +134,32 @@ class TestLookup(unittest.TestCase):
         self.assertEqual(aliases.canonicalFor("PSO SERVICE STATION 25 Karachi PAK"), "PSO 25")
         self.assertEqual(aliases.canonicalFor("PSO SERVICE STATION 7 Karachi PAK"), "PSO")
 
+    def test_a_trailing_space_does_not_anchor_a_prefix_on_a_word_boundary(self):
+        """The trap the documentation describes, pinned. `normalizeVendor`
+        strips the alias before it is stored, so `"KE "` is held as `ke` and
+        claims a fried-chicken franchise as readily as an electricity bill.
+        The anchor is content that is actually stable -- here the masked
+        consumer number, since every run of ten or more digits is masked to
+        x's and its last four before a vendor is stored."""
+        trailingSpace = aliasMap({"KE": {"prefix": ["KE "]}})
+        anchored = aliasMap({"KE": {"prefix": ["KE xxxxxxxxx"]}})
+
+        self.assertEqual(trailingSpace.canonicalFor("KENTUCKY FRIED CHICKEN"), "KE")
+        self.assertEqual(anchored.canonicalFor("KE xxxxxxxxx0001 ATM"), "KE")
+        self.assertEqual(
+            anchored.canonicalFor("KENTUCKY FRIED CHICKEN"), "KENTUCKY FRIED CHICKEN"
+        )
+
+    def test_an_empty_table_loads_and_groups_nothing(self):
+        """Legitimate: it is how grouping is switched off. The CLI warns when
+        asked to canonicalize with one, but the loader does not refuse it."""
+        aliases = VendorAliasMap.fromDict(
+            {"schemaVersion": MAP_SCHEMA_VERSION, "canonicalVendors": {}}
+        )
+
+        self.assertTrue(aliases.isEmpty)
+        self.assertEqual(aliases.canonicalFor("PSO"), "PSO")
+
     def test_the_alias_count_covers_both_kinds(self):
         aliases = aliasMap(
             {"PSO": {"exact": ["PSO AL ASKAR"], "prefix": ["PSO SERVICE STATION"]}}
@@ -162,6 +188,58 @@ class TestLoaderRejectsAmbiguity(unittest.TestCase):
     def test_a_map_with_no_schema_version_is_refused(self):
         with self.assertRaises(VendorMapError):
             VendorAliasMap.fromDict({"canonicalVendors": {}})
+
+    def test_a_schema_version_that_merely_compares_equal_is_refused(self):
+        """JSON `true` and `1.0` both == 1 in Python, and neither is a schema
+        version anyone wrote on purpose."""
+        for version in (True, 1.0, "1"):
+            with self.subTest(version=version), self.assertRaises(VendorMapError):
+                VendorAliasMap.fromDict(
+                    {"schemaVersion": version, "canonicalVendors": {}}
+                )
+
+    def test_a_canonical_name_claimed_as_another_entrys_alias_is_refused(self):
+        """It splits one merchant in two: a raw vendor spelled exactly as the
+        name goes to the other entry, while this entry's spellings are
+        rewritten *to* the name. The lookup is never chained, so the file is
+        asking for something the loader does not do."""
+        for entries in (
+            # as an exact alias
+            {
+                "PSO": {"exact": ["PSO SERVICE STATION"]},
+                "FUEL": {"exact": ["PSO"]},
+            },
+            # as a prefix
+            {
+                "PSO STATION 25": {"exact": ["PSO SERVICE STATION 25"]},
+                "FUEL": {"prefix": ["PSO"]},
+            },
+        ):
+            with self.subTest(entries=list(entries)):
+                with self.assertRaises(VendorMapError) as caught:
+                    aliasMap(entries)
+
+                self.assertIn("claimed as an alias", str(caught.exception))
+
+    def test_a_canonical_name_may_be_its_own_alias(self):
+        """The common case: one of the raw spellings is the name itself."""
+        aliases = aliasMap({"PSO": {"exact": ["PSO", "PSO SERVICE STATION"]}})
+
+        self.assertEqual(aliases.canonicalFor("PSO"), "PSO")
+
+    def test_a_padded_canonical_name_is_stored_stripped(self):
+        """It is rendered exactly as written, and a stray space in the file
+        rendered as a padded column."""
+        aliases = aliasMap({"  PSO ": {"prefix": ["PSO SERVICE STATION"]}})
+
+        self.assertEqual(aliases.canonicalNames, ("PSO",))
+        self.assertEqual(aliases.canonicalFor("PSO SERVICE STATION 7"), "PSO")
+
+    def test_a_canonical_name_with_a_control_character_is_refused(self):
+        with self.assertRaises(VendorMapError) as caught:
+            aliasMap({"PSO\x1b[31m": {"prefix": ["PSO SERVICE STATION"]}})
+
+        self.assertIn("control", str(caught.exception))
 
     def test_a_map_with_no_canonical_vendors_object_is_refused(self):
         with self.assertRaises(VendorMapError):

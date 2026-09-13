@@ -614,5 +614,52 @@ class TestRetention(BackupTestCase):
         self.assertNotIn("CreditCard", retained)
 
 
+class TestOutputOrderIsTotal(BackupTestCase):
+    """The documented order is total over every field a listing prints.
+
+    `(date, bank, vendor, currency, amount)` was documented as total and was
+    not: two cards charged the same amount at one merchant on one day shared
+    all five and kept whatever order the messages sat in. The key now carries
+    the instrument too, and what still ties is identical in every printed
+    field, so its order cannot be observed.
+    """
+
+    def _hblOnCard(self, lastFour: str) -> ET.Element:
+        body = (
+            f"Dear Customer, Your HBL CreditCard (ending with {lastFour}) has "
+            f"been charged at IMTIAZ SUPER MARKET for PKR-1,000.00 on 01/Oct/2023."
+        )
+
+        return self._createSms("4250", body)
+
+    def test_two_cards_charged_alike_on_one_day_are_ordered_by_card(self):
+        # written with the higher card first, so file order would be wrong
+        report = self._parseBackup([self._hblOnCard("2222"), self._hblOnCard("1111")])
+
+        self.assertEqual([txn.card.lastFour for txn in report.ccTxns], ["1111", "2222"])
+
+    def test_identical_same_minute_debits_are_both_kept(self):
+        """Told apart only by the running balance, which the report does not
+        keep -- so both survive dedup, both are listed, and the two rows are
+        the same in every printed field."""
+        template = (
+            "PKR 20,000.00 cash withdrawn from MEEZAN ATM DHA PHASE 6 from A/C "
+            "xxxxxx5602 KARACHI BRANCH on 15-Jun-24 at 09:05 Bal: PKR {balance}"
+        )
+
+        report = self._parseBackup(
+            [
+                self._createSms("8079", template.format(balance="41,234.00")),
+                self._createSms("8079", template.format(balance="21,234.00")),
+            ]
+        )
+
+        self.assertEqual(report.count("DUP"), 0)
+        self.assertEqual(len(report.debitTxns), 2)
+        self.assertEqual(
+            report.debitTxns[0].toDict(), report.debitTxns[1].toDict()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

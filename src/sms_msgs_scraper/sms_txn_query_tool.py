@@ -322,7 +322,31 @@ class StrictFailure(click.ClickException):
     exit_code = EXIT_STRICT_FAILURE
 
 
-@click.group()
+class _Cli(click.RichGroup):
+    """The group, with one correction to how a misplaced option is reported.
+
+    A Click group stops parsing its own options at the first positional
+    argument, so `backup.xml --format csv list_all_vendors` hands `--format`
+    to command resolution. Click's fallback then re-parses the remainder as
+    group arguments, `list_all_vendors` lands in FILEPATH, and the error says
+    `File 'list_all_vendors' does not exist` -- true, and no help at all.
+    """
+
+    def resolve_command(self, ctx, args):
+        cmdName = str(args[0])
+        # `backup.xml --help` is the one option Click's fallback exists for,
+        # and it does the right thing: the help goes to the group.
+        if cmdName.startswith("-") and cmdName not in ctx.help_option_names:
+            ctx.fail(
+                f"{cmdName!r} is not a command. Global options go before "
+                f"FILEPATH, and a command's own options after the command: "
+                f"sms-txn [GLOBAL OPTIONS] FILEPATH COMMAND [OPTIONS]"
+            )
+
+        return super().resolve_command(ctx, args)
+
+
+@click.group(cls=_Cli)
 @click.version_option(APP_VERSION, prog_name="sms_txn_query_tool")
 @click.argument(
     "filepath",
@@ -469,6 +493,41 @@ def bankOption(command):
         default=None,
         help="Only include transactions from this bank (default: all banks).",
     )(command)
+
+
+def _validateOptions(ctx, fromDate=None, toDate=None, vendor=None, canonicalVendors=False):
+    """Refuse a bad option before the backup is read, not after.
+
+    The module docstring promises that argument validation completes without
+    touching the file, and Click keeps that promise for everything it can
+    check on its own. These three it cannot: a date range whose ends are the
+    wrong way round, a `--vendor` with nothing in it, and a `--vendor-map`
+    that exists but does not load. Each command used to discover those only
+    after parsing every message -- a header, a parse summary and a page of
+    skip warnings on stderr, and then exit 2 with nothing on stdout.
+
+    The vendor map is loaded here, and memoised, whenever a vendor option is
+    present; a command that names neither still never opens it.
+    """
+    if fromDate is not None and toDate is not None and fromDate > toDate:
+        raise click.BadParameter(
+            f"--from-date ({fromDate.date()}) is after --to-date ({toDate.date()})"
+        )
+
+    if vendor is not None and not normalizeVendor(vendor):
+        raise click.BadParameter("--vendor needs some text to match on")
+
+    if vendor is not None or canonicalVendors:
+        aliases = ctx.obj.vendorMap()
+        # Not refused: an empty table is a legitimate way to switch grouping
+        # off. But asked to canonicalize with it, the flag silently does
+        # nothing, and that is worth a line on stderr.
+        if canonicalVendors and aliases.isEmpty:
+            ctx.obj.furniture(
+                printWarning,
+                "WARNING: --canonical-vendors given, but the vendor map has no "
+                "entries, so no vendor will be renamed",
+            )
 
 
 def _filterTxnsByDateRange(txns, fromDate, toDate):
@@ -692,6 +751,7 @@ def list_all_vendors(ctx, from_date, to_date, bank, vendor, canonical_vendors):
     an alias entry: it is the set of distinct spellings the banks actually
     sent, which is what an alias has to match.
     """
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
@@ -728,6 +788,7 @@ def list_all_cc_txns(ctx, from_date, to_date, bank, vendor, canonical_vendors):
     """List every credit card transaction, from HBL, Faysal Bank and Standard
     Chartered together.
     """
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
@@ -764,13 +825,15 @@ def list_all_cc_txns(ctx, from_date, to_date, bank, vendor, canonical_vendors):
     "-v",
     is_flag=True,
     default=False,
-    help="Also list the transactions the summary was built from.",
+    help="Also list the transactions the summary was built from. Table output "
+    "only: JSON and CSV carry the summary rows either way.",
 )
 @click.pass_context
 def monthly_cc_spending_summary(
     ctx, from_date, to_date, bank, vendor, canonical_vendors, verbose
 ):
     """Summarize credit card spending month by month, one column per currency."""
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = _filterTxnsByBank(report.ccTxns, bank)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
@@ -808,7 +871,8 @@ def monthly_cc_spending_summary(
     "-v",
     is_flag=True,
     default=False,
-    help="Also list the transactions the total was built from.",
+    help="Also list the transactions the total was built from. Table output "
+    "only: JSON and CSV carry the summary rows either way.",
 )
 @click.pass_context
 def cc_spend_for_month(ctx, month, vendor, canonical_vendors, verbose):
@@ -821,24 +885,26 @@ def cc_spend_for_month(ctx, month, vendor, canonical_vendors, verbose):
     have.
     """
     monthKey = month.strftime(MONTH_KEY_FMT)
+    _validateOptions(ctx, vendor=vendor, canonicalVendors=canonical_vendors)
     report = ctx.obj.report()
     txns = [txn for txn in report.ccTxns if monthKeyFor(txn) == monthKey]
     txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
+
+    # The empty state names the filter too. "No credit card transactions in
+    # 2023-10" with --vendor in force read as a month with no spending, when
+    # the month was full and the merchant was absent from it.
+    filterLabel = _filterLabel(
+        None, None, vendor=vendor, canonicalVendors=canonical_vendors
+    )
 
     _emitMonthly(
         ctx,
         txns,
         verbose,
         title=f"CC spend for {monthKey}",
-        emptyMessage=f"No credit card transactions in {monthKey}.",
+        emptyMessage=f"No credit card transactions in {monthKey}{filterLabel}.",
         line=f"Totalling {len(txns):,} CC transactions in {monthKey}, "
-        f"across all banks"
-        f"{_filterLabel(
-            None,
-            None,
-            vendor=vendor,
-            canonicalVendors=canonical_vendors,
-        )}:",
+        f"across all banks{filterLabel}:",
         detailTable=lambda: ccTxnsTable(txns),
         summaryTable=lambda: bankSpendTable(txns),
     )
@@ -858,6 +924,7 @@ def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_
     """List every Meezan account debit -- card purchases, ATM withdrawals, bill
     payments and funds transfers.
     """
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = _filterTxnsByDateRange(report.debitTxns, from_date, to_date)
     if txn_type is not None:
@@ -895,7 +962,8 @@ def list_all_debit_txns(ctx, from_date, to_date, vendor, canonical_vendors, txn_
     "-v",
     is_flag=True,
     default=False,
-    help="Also list the transactions the summary was built from.",
+    help="Also list the transactions the summary was built from. Table output "
+    "only: JSON and CSV carry the summary rows either way.",
 )
 @click.pass_context
 def monthly_debit_spending_summary(
@@ -904,6 +972,7 @@ def monthly_debit_spending_summary(
     """Summarize Meezan account debit spending month by month, one column per
     currency.
     """
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = _filterTxnsByDateRange(report.debitTxns, from_date, to_date)
     txns = _applyVendorOptions(ctx, txns, vendor, canonical_vendors)
@@ -955,7 +1024,12 @@ def monthly_vendor_chart(ctx, from_date, to_date, vendor, canonical_vendors, gro
     With [bold]--format json[/] or [bold]--format csv[/] this writes the series
     behind the chart -- month, series, currency, amount -- with every series
     named rather than folded into "Other".
+
+    The chart runs from the first month with a transaction to the last, not
+    from [bold]--from-date[/] to [bold]--to-date[/]: a requested range that
+    starts before the first transaction is not padded with empty months.
     """
+    _validateOptions(ctx, from_date, to_date, vendor, canonical_vendors)
     report = ctx.obj.report()
     txns = sorted(report.ccTxns + report.debitTxns, key=txnSortKey)
     txns = _filterTxnsByDateRange(txns, from_date, to_date)
@@ -999,7 +1073,10 @@ def _seriesGrouping(groupBy, txns):
     The order is what the chart assigns colours and glyphs from, so it must
     depend only on *which* series exist and never on how large they are --
     otherwise narrowing a date range repaints the survivors and two runs stop
-    being comparable by eye.
+    being comparable by eye. That holds up to four series. Past four the chart
+    names the largest four and folds the rest, so a narrower range that
+    changes which four are largest does repaint them; the order here keeps
+    the survivors' *relative* positions stable, which is what it can promise.
 
     Bank and transaction type keep the colours they wear in every table in this
     tool, which is why they are ordered by the registry and by the enum rather
@@ -1043,8 +1120,9 @@ def _seriesGrouping(groupBy, txns):
     "-v",
     is_flag=True,
     default=False,
-    help="Also break the messages down by sender short code, by parse-failure "
-    "reason, and by how much of the deduplication was a judgement call.",
+    help="Also break the messages down by sender short code, the diagnostics "
+    "by bank and reason, and the deduplication by how much of it was a "
+    "judgement call.",
 )
 @click.pass_context
 def backup_info(ctx, verbose):
@@ -1060,7 +1138,7 @@ def backup_info(ctx, verbose):
     two very different bugs that look identical in a count.
 
     With [bold]--verbose[/] it adds the breakdowns *inside* those counts: one
-    row per declared sender short code, the parse failures by bank and reason,
+    row per declared sender short code, the diagnostics by bank and reason,
     and how many suppressed duplicates could not be proved to be
     retransmissions. The sender table is the one worth reading -- a short code
     that has gone quiet is what a bank re-homing its alerts looks like from

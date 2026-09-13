@@ -7,10 +7,12 @@ identifies transaction alerts by sender short code, parses them into transaction
 repeats, and reports them — as listings, as unique vendor lists, or as month-by-month spending
 totals broken down by currency.
 
-**Version 2.5.2**, a patch: vendor and account fields no longer carry a card, account, consumer or
-phone number (any run of ten or more digits is masked to its last four), `--quiet` now means an
-empty stderr, and a repeated non-transaction message no longer counts as an ambiguous duplicate.
-2.5.0 added `backup_info` — what the backup file itself is: its size, its SHA-256, what it declares
+**Version 2.6.0**, a minor release: `backup_info` now reports one message count and one skipped
+count per bank, the skipped counts come off the buckets that know a warning from a failure, and a
+dozen defects a user would meet are fixed — a bad option is refused before the backup is read,
+chart ticks under ten no longer repeat, and the documented sort order is now total. 2.5.2 masked
+card, account, consumer and phone numbers out of every vendor field. 2.5.0 added `backup_info` —
+what the backup file itself is: its size, its SHA-256, what it declares
 it holds against what was found in it, and where its messages went. See
 [what changed](#whats-new-in-200) if you are coming from 1.x — three things behave differently for
 an existing caller.
@@ -82,9 +84,13 @@ only ever an account debit, a fuel station is only ever a card, and one command 
 | `backup_info` | the file's size, SHA-256 and modification time; its envelope accounting; where its messages were routed; the window its transactions cover |
 
 This one describes the file rather than the spending in it, so it takes none of the filters below —
-a file does not have a date range. Its only option is `--verbose` / `-v`, which adds the
-breakdowns *inside* those counts: one row per declared sender short code, the parse failures by
-bank and reason, and how many suppressed duplicates could not be proved to be retransmissions.
+a file does not have a date range. Its default output includes one message count per bank and one
+**skipped** count per bank — messages that carried a bank's transaction signal and produced no
+transaction — with a zero printed rather than a row left out, because a bank at zero is a finding.
+Its only option is `--verbose` / `-v`, which adds the breakdowns *inside* those counts: one row per
+declared sender short code, every diagnostic by bank and reason (a warning about an unrecognised
+card mask is a diagnostic that keeps its transaction, so this table can be longer than the skipped
+counts), and how many suppressed duplicates could not be proved to be retransmissions.
 
 ```bash
 uv run sms-txn backup.xml backup_info
@@ -143,6 +149,16 @@ command writes the series behind the chart (`month, series, currency, amount`) w
 series named: the four-series cap is a readability limit of a terminal bar, and a consumer handed
 `Other` could never recover what was in it.
 
+Two things about its layout to know:
+
+- **The chart runs from the first month with a transaction to the last**, not from `--from-date`
+  to `--to-date`. The range is a filter; the axis covers the months that survived it, so a range
+  that starts before the first transaction is not padded with empty months at the front.
+- **It needs about 56 columns.** A row is a month label, a bar of at least 20 cells, the total and
+  the change; narrower than that, every row wraps. The total column is sized to the widest total
+  in the run, and a change of a thousand percent or more prints as `>999%`, so a row never widens
+  past what it was measured for.
+
 ### Command options
 
 All commands except `cc_spend_for_month` and `backup_info` accept an inclusive date range:
@@ -166,8 +182,13 @@ All commands except `cc_spend_for_month` and `backup_info` accept an inclusive d
   carries the strings the banks actually sent.
 
 The two monthly summary commands and `cc_spend_for_month` accept `--verbose` / `-v`, which also
-lists the transactions the summary was built from. `monthly_vendor_chart` accepts
-`--group-by {vendor|bank|txn-type|none}`. `backup_info` accepts `--verbose` too, and nothing else.
+lists the transactions the summary was built from — in table output only; JSON and CSV carry the
+summary rows either way. `monthly_vendor_chart` accepts `--group-by {vendor|bank|txn-type|none}`.
+`backup_info` accepts `--verbose` too, and nothing else.
+
+A date range whose ends are the wrong way round, a `--vendor` with nothing in it, and a
+`--vendor-map` that exists but does not load are all refused **before the backup is read** — the
+same way every other bad option is.
 
 When `list_all_cc_txns` or `list_all_debit_txns` is given a date range and/or `--vendor`, its table
 output also carries an **Aggregate spend** block under the listing: one row per currency, with that
@@ -214,8 +235,8 @@ set.
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | the backup file could not be read or parsed |
-| 2 | usage error (a bad option or argument) |
+| 1 | the backup file could not be read or parsed, or the `--vendor-map` file exists but does not load |
+| 2 | usage error (a bad option or argument, including a global option written after the file path) |
 | 3 | `--strict` was given and the run had something to report |
 
 ### Examples
@@ -547,6 +568,42 @@ nothing anywhere by design.
 **Canonicalization never changes an amount, a transaction count or a total** — it only changes what
 the output calls things, and `tests/test_vendor_filter.py` pins that. It is also opt-in: without
 `--canonical-vendors`, every command reports the strings the banks sent.
+
+## What's new in 2.6.0
+
+A minor release: the P2 items of the adversarial review of 2.1.0–2.5.1 — the defects a user would
+meet. One of them adds rows to `backup_info`; the rest are fixes. No existing invocation changes
+meaning, and no amount, count or total moves.
+
+- **`backup_info` reports one message count and one skipped count per bank**, zeros included, in
+  its default output. The skipped counts come off the `<ID>_SKIPPED` buckets. The `--verbose`
+  table that counted every diagnostic was titled *Parse failures* and its JSON section
+  `parseFailures`, while a warning about an unrecognised card mask — which keeps its transaction —
+  was in it. It is now *Diagnostics* / `diagnostics`, which is what it always counted.
+- **A bad option is refused before the backup is read.** An inverted date range, an empty
+  `--vendor` and a malformed `--vendor-map` used to be discovered only after every message had
+  been parsed and every skip warning printed.
+- **A global option written after the file path is explained.** `backup.xml --format csv
+  list_all_vendors` used to fail with `File 'list_all_vendors' does not exist`; it now says the
+  option is not a command and where the options go.
+- **Chart ticks under ten keep a decimal**, so a USD month no longer draws an axis reading
+  `0 1 2 2 3`. A series literally named `Other` keeps its own slot rather than being merged into
+  the fold bucket. A total wider than its column widens the column instead of wrapping the row,
+  and a change of a thousand percent or more prints as `>999%`.
+- **The documented sort order is total.** Two cards charged the same amount at one merchant on one
+  day shared the whole `(date, bank, vendor, currency, amount)` key and kept file order; the key now
+  carries the debit type and the card or account too, so what still ties is identical in every
+  printed field.
+- **The alias loader refuses four more shapes.** A canonical name that another entry claims as an
+  alias (it split one merchant in two), a canonical name with edge whitespace or a control
+  character (it is now stored stripped), and a `schemaVersion` of `true` or `1.0`. Asking for
+  `--canonical-vendors` with an empty table now warns that nothing will be renamed.
+- `cc_spend_for_month`'s empty state names the vendor filter when one is in force; `--verbose` help
+  says it is table-only; an empty backup file is reported as empty; exit code 1 is documented for a
+  malformed vendor map.
+- The verifier now reports how many vendor strings each alias wins and asserts the aggregate
+  against the reference backup, so an alias that over-claims fails the run; a malformed private
+  table is a FAIL line rather than a traceback.
 
 ## What's new in 2.5.2
 

@@ -234,8 +234,17 @@ class TestAxisTickLabels(unittest.TestCase):
         self.assertEqual(_compactAmount(Decimal(0)), "0")
         self.assertEqual(_compactAmount(Decimal(750)), "750")
 
+    def test_a_tick_under_ten_keeps_one_decimal_too(self):
+        """The 2.5.1 fix stopped at the thousands unit. A USD or CAD month is
+        frequently single-digit, and a 3-scale axis read `0 1 2 2 3`."""
+        self.assertEqual(_compactAmount(Decimal("2.25")), "2.2")
+        self.assertEqual(_compactAmount(Decimal("1.5")), "1.5")
+        self.assertEqual(_compactAmount(Decimal("0.75")), "0.8")
+        self.assertEqual(_compactAmount(Decimal(3)), "3")
+        self.assertEqual(_compactAmount(Decimal(12)), "12")
+
     def test_the_five_ticks_of_a_small_axis_are_all_distinct(self):
-        for scale in (2000, 3000, 4000, 6000):
+        for scale in (2, 3, 6, 7, 9, 2000, 3000, 4000, 6000):
             with self.subTest(scale=scale):
                 labels = [
                     _compactAmount(Decimal(scale) * Decimal(fraction))
@@ -323,6 +332,29 @@ class TestSeriesSelection(unittest.TestCase):
 
         self.assertEqual(slots, {names.index("B")})
         self.assertEqual(amounts["2025-01"][names.index("A")], Decimal(0))
+
+    def test_a_series_literally_named_other_keeps_its_own_slot(self):
+        """The fold bucket is an object, not the string "Other". A series is
+        named by the data -- a vendor string, a canonical name -- and one of
+        those can be "Other"; keyed on the string, it shared the bucket's
+        slot, its amounts were added to the bucket and its glyph vanished."""
+        perMonth = self._perMonth(
+            [
+                ("A", "500"), ("B", "400"), ("Other", "300"), ("D", "200"),
+                ("E", "1"), ("F", "2"),
+            ]
+        )
+
+        names = selectSeries(perMonth, ["A", "B", "D", "E", "F", "Other"], ["PKR"])
+        amounts, slots = foldSeries(perMonth, "PKR", names)
+
+        self.assertEqual(names, ["A", "B", "D", "Other", OTHER_SERIES])
+        self.assertEqual(str(OTHER_SERIES), "Other")
+        self.assertNotEqual(OTHER_SERIES, "Other")
+        # the real series keeps its own amount, and the bucket holds E + F
+        self.assertEqual(amounts["2025-01"][names.index("Other")], Decimal(300))
+        self.assertEqual(amounts["2025-01"][MAX_NAMED_SERIES], Decimal(3))
+        self.assertEqual(slots, {0, 1, 2, 3, 4})
 
 
 class ChartCliTestCase(unittest.TestCase):
@@ -605,7 +637,7 @@ class TestTheMachineFormats(ChartCliTestCase):
         series = {row["series"] for row in rows}
 
         self.assertEqual(len(series), 6)
-        self.assertNotIn(OTHER_SERIES, series)
+        self.assertNotIn(str(OTHER_SERIES), series)
 
     def test_the_rendered_chart_does_fold_into_other(self):
         """The counterpart of the test above: the *table* output folds, because
@@ -620,7 +652,7 @@ class TestTheMachineFormats(ChartCliTestCase):
         result = self.run_cli([str(backup), "monthly_vendor_chart"])
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn(OTHER_SERIES, result.stdout)
+        self.assertIn(str(OTHER_SERIES), result.stdout)
         # The two smallest fold together: 100.00 + 200.00.
         self.assertIn("300.00", result.stdout)
         # ... and the total is still every transaction.
@@ -643,7 +675,7 @@ class TestTheMachineFormats(ChartCliTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("PKR totals", result.stdout)
         self.assertIn("USD totals", result.stdout)
-        self.assertIn(OTHER_SERIES, result.stdout)
+        self.assertIn(str(OTHER_SERIES), result.stdout)
         self.assertIn("2,100.00", result.stdout)
         self.assertIn("39.99", result.stdout)
 
@@ -661,6 +693,141 @@ class TestTheMachineFormats(ChartCliTestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.stdout.strip(), "month,series,currency,amount")
+
+
+class TestChartLayoutAndOptions(ChartCliTestCase):
+    """The cases the review found untested: a total wider than its column, a
+    change past 999%, a narrow terminal, and the chart under each option it
+    shares with the other commands."""
+
+    def _rowFor(self, result, label):
+        return next(line for line in result.stdout.splitlines() if label in line)
+
+    def test_a_wide_total_widens_its_column_rather_than_wrapping_the_row(self):
+        """The total column used to be fixed at thirteen characters, so a
+        total of thirteen or more ran past it and Rich wrapped the row --
+        the month on one line and its total on the next. At 60 columns that
+        is exactly what would happen here without sizing from the data."""
+        backup = self._backup(
+            [
+                self._sms("4250", hblBody("PSO", "123,456,789.00", "10/Jan/2025")),
+                self._sms("4250", hblBody("PSO", "246,913,578.00", "10/Feb/2025")),
+            ]
+        )
+        runner = CliRunner(env={"COLUMNS": "60"})
+
+        result = runner.invoke(cli, [str(backup), "monthly_vendor_chart"], catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("123,456,789.00", self._rowFor(result, "Jan 2025"))
+        febRow = self._rowFor(result, "Feb 2025")
+        self.assertIn("246,913,578.00", febRow)
+        self.assertIn("▲ 100.0%", febRow)
+
+    def test_a_change_past_999_percent_is_clamped_rather_than_widening_the_row(self):
+        backup = self._backup(
+            [
+                self._sms("4250", hblBody("PSO", "1.00", "10/Jan/2025")),
+                self._sms("4250", hblBody("PSO", "50.00", "10/Feb/2025")),
+            ]
+        )
+
+        result = self.run_cli([str(backup), "monthly_vendor_chart"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("▲  >999%", self._rowFor(result, "Feb 2025"))
+        self.assertNotIn("4900", result.stdout)
+
+    def test_a_narrow_terminal_still_gets_a_chart(self):
+        """Below about 56 columns every row wraps; nothing is dropped."""
+        runner = CliRunner(env={"COLUMNS": "40"})
+
+        result = runner.invoke(
+            cli, [str(self._gappedBackup()), "monthly_vendor_chart"], catch_exceptions=False
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        for label in ("Jan 2025", "Feb 2025", "Mar 2025", "3,500.00"):
+            with self.subTest(label=label):
+                self.assertIn(label, result.stdout)
+
+    def test_no_color_renders_the_same_figures_without_escapes(self):
+        result = self.run_cli(
+            ["--no-color", str(self._gappedBackup()), "monthly_vendor_chart"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn("\x1b[", result.stdout)
+        self.assertIn("3,500.00", result.stdout)
+
+    def test_the_chart_starts_at_the_first_transaction_month_not_the_from_date(self):
+        """Documented rather than changed: the requested range is a filter,
+        and the axis runs over the months that survived it."""
+        result = self.run_cli(
+            [
+                str(self._gappedBackup()),
+                "monthly_vendor_chart",
+                "--from-date",
+                "2025-02-01",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Charting 1 transactions", result.stderr)
+        self.assertIn("Mar 2025", result.stdout)
+        self.assertNotIn("Jan 2025", result.stdout)
+        self.assertNotIn("Feb 2025", result.stdout)
+
+    def test_canonical_vendors_regroup_the_series(self):
+        mapPath = Path(tempfile.mkdtemp()) / "map.json"
+        self.addCleanup(lambda: mapPath.unlink() if mapPath.exists() else None)
+        mapPath.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "canonicalVendors": {"FUEL": {"prefix": ["PSO", "SHELL"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_cli(
+            [
+                "--vendor-map",
+                str(mapPath),
+                str(self._gappedBackup()),
+                "monthly_vendor_chart",
+                "--canonical-vendors",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("FUEL", result.stdout)
+        self.assertNotIn("SHELL", result.stdout)
+        # regrouped, not re-totalled
+        self.assertIn("3,500.00", result.stdout)
+
+    def test_group_by_txn_type_names_the_meezan_series_too(self):
+        backup = self._backup(
+            [
+                self._sms("4250", hblBody("PSO", "1,000.00", "10/Jan/2025")),
+                self._sms(
+                    "8079",
+                    "PKR 20,000.00 cash withdrawn from MEEZAN ATM DHA PHASE 6 "
+                    "from A/C xxxxxx5602 KARACHI BRANCH on 15-Jan-25 at 09:05 "
+                    "Bal: PKR 1,234.00",
+                ),
+            ]
+        )
+
+        result = self.run_cli(
+            [str(backup), "monthly_vendor_chart", "--group-by", "txn-type"]
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("credit_card", result.stdout)
+        self.assertIn("atm_withdrawal", result.stdout)
+        self.assertIn("21,000.00", result.stdout)
 
 
 if __name__ == "__main__":

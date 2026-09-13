@@ -351,11 +351,25 @@ def _messagesTable(report):
     duplicates = report.count("DUP")
     other = report.count("OTHER")
 
+    # One row per bank, zeros included, by the sender table's own argument: a
+    # bank at zero is a finding rather than an absence of data.
+    perBank = [
+        (
+            f"  from {spec.id}",
+            countText(
+                report.count(spec.id),
+                style="column.count" if report.count(spec.id) else "column.empty",
+            ),
+        )
+        for spec in REGISTRY
+    ]
+
     return _fieldTable(
         "Messages",
         [
             ("Messages", countText(total)),
             ("From a bank", countText(total - duplicates - other)),
+            *perBank,
             ("From another sender", countText(other, style="bucket.other")),
             (
                 "Duplicates suppressed",
@@ -366,6 +380,34 @@ def _messagesTable(report):
             ),
         ],
         caption=f"duplicate policy: {report.duplicatePolicy}",
+    )
+
+
+def _skippedTable(report):
+    """Messages that carried a bank's transaction signal and produced no
+    transaction, one row per bank, zeros included.
+
+    Read off the `<ID>_SKIPPED` buckets rather than the diagnostics. A warning
+    is a diagnostic too, and it keeps its transaction -- an unrecognised SCB
+    card mask is the case -- so a count of diagnostics called a parsed
+    transaction a failure. The two coincide on the reference backup, which is
+    what hid it.
+    """
+    return _fieldTable(
+        "Skipped",
+        [
+            (
+                spec.id,
+                countText(
+                    report.count(spec.skippedBucket),
+                    style="bucket.skipped"
+                    if report.count(spec.skippedBucket)
+                    else "column.empty",
+                ),
+            )
+            for spec in REGISTRY
+        ],
+        caption="carried a txn signal but could not be parsed",
     )
 
 
@@ -459,16 +501,24 @@ def _sendersTable(report):
     return table
 
 
-def _parseFailuresTable(report):
-    """Skips by bank and reason. "26 skipped" is a number; "21 truncated, 5
-    with no amount" is a diagnosis.
+def _diagnosticsTable(report):
+    """Every diagnostic by bank and reason. "26 skipped" is a number; "21
+    truncated, 5 with no amount" is a diagnosis.
+
+    Labelled as diagnostics rather than failures, because a warning is in
+    here too and a warning keeps its transaction. What did *not* parse is the
+    Skipped table above, read off the buckets.
     """
     counts = Counter(
         (diagnostic.bank, str(diagnostic.reason))
         for diagnostic in report.diagnostics
     )
 
-    table = summaryTable("Parse failures", showFooter=True)
+    table = summaryTable(
+        "Diagnostics",
+        showFooter=True,
+        caption="a warning keeps its transaction; see Skipped",
+    )
     table.add_column("Bank", footer=labelText("ALL", style="column.total"))
     table.add_column("Reason")
     table.add_column(
@@ -524,15 +574,16 @@ def backupInfoTables(fileInfo, report, verbose: bool = False):
         _fileTable(fileInfo),
         _envelopeTable(report),
         _messagesTable(report),
+        _skippedTable(report),
         _transactionsTable(report),
     ]
 
     if verbose:
         tables.append(_sendersTable(report))
-        # Only when there were any. An empty failures table reads as a table
-        # that failed to populate rather than as a clean run.
+        # Only when there were any. An empty diagnostics table reads as a
+        # table that failed to populate rather than as a clean run.
         if report.diagnostics:
-            tables.append(_parseFailuresTable(report))
+            tables.append(_diagnosticsTable(report))
         tables.append(_duplicatesTable(report))
 
     return tables

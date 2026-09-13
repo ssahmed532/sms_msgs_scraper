@@ -37,6 +37,18 @@ def txnSortKey(txn):
     midnight on the same day. Bank, vendor, currency and amount resolve those
     deterministically.
 
+    Those five did not make it total. Two cards charged the same amount at the
+    same merchant on the same day share all five, and so do two Meezan debits
+    of one amount at one vendor within one minute -- consecutive ATM
+    withdrawals, a payee paid twice. So the key also carries the two fields a
+    listing prints that the five do not cover: the debit type, and the card or
+    account the money left. With those the order is total over everything a
+    reader can see. Transactions that still share the whole key are identical
+    in every printed field -- on the reference backup, fourteen groups of
+    Meezan debits told apart only by a running balance the tool does not
+    keep -- so their relative order cannot be observed, and every sort here is
+    stable in any case.
+
     It lives here, rather than privately in the orchestrator that first sorts a
     report, because *vendor* is one of the tie-breakers: rewriting vendors to
     their canonical names can reorder a listing, so anything that rewrites them
@@ -48,7 +60,18 @@ def txnSortKey(txn):
         txn.vendor,
         txn.money.currency,
         txn.money.amount,
+        str(getattr(txn, "txnType", "")),
+        _instrumentFor(txn),
     )
+
+
+def _instrumentFor(txn) -> str:
+    """The card or account a transaction was made on, as a listing prints it."""
+    card = getattr(txn, "card", None)
+    if card is not None:
+        return card.lastFour or ""
+
+    return getattr(txn, "acctMask", "")
 
 
 def txnDateSpan(txns):

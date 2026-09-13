@@ -151,7 +151,9 @@ class VendorAliasMap:
             )
 
         version = data.get("schemaVersion")
-        if version != MAP_SCHEMA_VERSION:
+        # By type as well as value: JSON's `true` and `1.0` both compare equal
+        # to 1, and neither is a schema version anyone wrote on purpose.
+        if type(version) is not int or version != MAP_SCHEMA_VERSION:
             raise VendorMapError(
                 f"vendor map schema version {version!r} cannot be read by this "
                 f"build, which reads version {MAP_SCHEMA_VERSION}"
@@ -173,6 +175,18 @@ class VendorAliasMap:
                 raise VendorMapError(
                     f"a canonical vendor name must be a non-empty string, "
                     f"got {canonical!r}"
+                )
+
+            # Stored stripped: the name is rendered exactly as written, and a
+            # stray space in the file rendered as a padded column. Anything
+            # that does not print -- a control character, an invisible
+            # formatting mark -- is refused for the same reason it would be
+            # stripped from a vendor at the render boundary.
+            canonical = canonical.strip()
+            if not canonical.isprintable():
+                raise VendorMapError(
+                    f"the canonical vendor name {canonical!r} contains a "
+                    f"control or non-printable character"
                 )
 
             canonicalKey = normalizeVendor(canonical)
@@ -202,7 +216,7 @@ class VendorAliasMap:
                     f"{canonical!r} and as a prefix by {prefixCanonical!r}"
                 )
 
-        return cls(
+        aliases = cls(
             exactAliases=MappingProxyType(dict(exact)),
             # Longest first, so a more specific alias beats a broader one. Ties
             # are broken alphabetically only to make the order total: two
@@ -212,6 +226,23 @@ class VendorAliasMap:
             ),
             canonicalNames=tuple(canonicalNames),
         )
+
+        # A canonical name that another entry claims as an alias splits one
+        # merchant into two: a raw vendor spelled exactly as the name goes to
+        # the other entry, while the spellings this entry groups are rewritten
+        # *to* the name. The lookup is applied once and never chained, so the
+        # file is asking for something the loader does not do.
+        for canonical in canonicalNames:
+            owner = aliases.canonicalFor(canonical)
+            if owner != canonical:
+                raise VendorMapError(
+                    f"the canonical vendor {canonical!r} is itself claimed as an "
+                    f"alias by {owner!r}, so a vendor spelled exactly that way "
+                    f"would be grouped under a different name from the "
+                    f"spellings grouped under it"
+                )
+
+        return aliases
 
     @classmethod
     def loadFromPath(cls, path: Path) -> VendorAliasMap:

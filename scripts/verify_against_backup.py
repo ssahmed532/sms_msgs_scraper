@@ -73,6 +73,7 @@ from sms_msgs_scraper.domain.message import SMS_TAG, SmsRecord  # noqa: E402
 from sms_msgs_scraper.domain.types import LONG_DIGIT_RUN_PTTRN  # noqa: E402
 from sms_msgs_scraper.domain.vendors import (  # noqa: E402
     VendorAliasMap,
+    VendorMapError,
     normalizeVendor,
 )
 from sms_msgs_scraper.parser.registry import REGISTRY  # noqa: E402
@@ -193,6 +194,23 @@ EXPECTED_TOTALS = {
     ("FBL", "CAD"): Decimal("2.00"),
     ("SCB", "PKR"): Decimal("2918984.99"),
     ("MEZN", "PKR"): Decimal("37034319.58"),
+}
+
+# What the private alias table does to the reference backup, asserted only when
+# both are present. `claimed_vendors` is the tripwire for an alias that
+# over-claims: the corpus is fixed by its digest, so the only way one more raw
+# vendor string can come under an alias is the table or the code changing --
+# and a merchant that merely starts with the same word as a utility is
+# mis-attributed spending that looks exactly like real spending. The liveness
+# checks catch an alias claiming too little; nothing caught one claiming too
+# much until this did. Derived 2026-09-13 (see the Reference numbers table in
+# CLAUDE.md).
+EXPECTED_VENDOR_MAP = {
+    "aliases": 68,
+    "canonical_names": 57,
+    "raw_vendors": 544,
+    "claimed_vendors": 169,
+    "after_canonicalization": 431,
 }
 
 # The spending that declaring SCB's second short code recovered. Independently
@@ -529,62 +547,104 @@ def checkVendorAliases(report) -> tuple[list, dict, bool]:
     values from the map file, which is config a person wrote; no vendor string
     out of the corpus is printed, so this check keeps the script's rule that
     its output carries no message content.
+
+    Every alias also reports how many raw vendor strings it *won* -- the alias
+    `canonicalFor` actually resolves a vendor by, so a prefix shadowed by a
+    longer one is not credited with the longer one's vendors. That count is
+    printed per alias and asserted in aggregate as `claimed_vendors`, which
+    is the check for an alias claiming too much: the liveness rule can only
+    see one claiming too little.
     """
     isLocal = LOCAL_VENDOR_MAP_PATH.is_file()
-    aliases = (
-        VendorAliasMap.loadFromPath(LOCAL_VENDOR_MAP_PATH)
-        if isLocal
-        else VendorAliasMap.loadDefault()
-    )
+    source = LOCAL_VENDOR_MAP_PATH.name if isLocal else "packaged examples"
 
     vendors = {txn.vendor for txn in report.ccTxns}
     vendors.update(txn.vendor for txn in report.debitTxns)
-    keys = sorted(normalizeVendor(vendor) for vendor in vendors)
+
+    stats = {
+        "source": source,
+        "loaded": False,
+        "aliases": 0,
+        "canonical_names": 0,
+        "raw_vendors": len(vendors),
+        "claimed_vendors": 0,
+        "after_canonicalization": len(vendors),
+        "claims": [],
+    }
+
+    # A malformed table used to escape as a traceback, which reads as the
+    # verifier being broken rather than the table. It is a FAIL line like any
+    # other, whichever backup is being verified.
+    try:
+        aliases = (
+            VendorAliasMap.loadFromPath(LOCAL_VENDOR_MAP_PATH)
+            if isLocal
+            else VendorAliasMap.loadDefault()
+        )
+    except VendorMapError as error:
+        return [f"vendor map: {source} did not load -- {error}"], stats, isLocal
 
     failures = []
 
-    for alias, canonical in aliases.exactAliases.items():
-        if alias not in keys:
-            failures.append(
-                f"vendor map: exact alias {alias!r} (for {canonical!r}) matches "
-                f"no vendor in this backup"
-            )
-
-    for alias, canonical in aliases.prefixAliases:
-        if not any(key.startswith(alias) for key in keys):
-            failures.append(
-                f"vendor map: prefix alias {alias!r} (for {canonical!r}) matches "
-                f"no vendor in this backup"
-            )
-
-    # A vendor is *claimed* when an alias matches it -- which is not the same
-    # as its canonical name differing from it. A merchant whose raw string is
-    # already exactly its canonical name is claimed and must be counted, or a
+    # Which alias each raw vendor string resolves by, mirroring `canonicalFor`:
+    # an exact alias first, then the longest matching prefix. A vendor is
+    # *claimed* when some alias wins it -- which is not the same as its
+    # canonical name differing from it. A merchant whose raw string is already
+    # exactly its canonical name is claimed and must be counted, or a
     # perfectly good two-spelling group looks like a one-spelling one.
-    claimed: dict[str, set] = defaultdict(set)
+    claimsPerAlias: dict[tuple, int] = {
+        ("exact", alias, canonical): 0
+        for alias, canonical in aliases.exactAliases.items()
+    }
+    claimsPerAlias.update(
+        {("prefix", alias, canonical): 0 for alias, canonical in aliases.prefixAliases}
+    )
+    spellings: dict[str, set] = defaultdict(set)
+
     for vendor in vendors:
         key = normalizeVendor(vendor)
-        isClaimed = key in aliases.exactAliases or any(
-            key.startswith(prefix) for prefix, _ in aliases.prefixAliases
-        )
-        if isClaimed:
-            claimed[aliases.canonicalFor(vendor)].add(vendor)
+        winner = None
+        canonical = aliases.exactAliases.get(key)
+        if canonical is not None:
+            winner = ("exact", key, canonical)
+        else:
+            for prefix, prefixCanonical in aliases.prefixAliases:
+                if key.startswith(prefix):
+                    winner = ("prefix", prefix, prefixCanonical)
+                    break
+        if winner is not None:
+            claimsPerAlias[winner] += 1
+            spellings[winner[2]].add(vendor)
+
+    for (kind, alias, canonical), count in claimsPerAlias.items():
+        if count == 0:
+            failures.append(
+                f"vendor map: {kind} alias {alias!r} (for {canonical!r}) wins no "
+                f"vendor in this backup"
+            )
 
     for canonical in aliases.canonicalNames:
-        spellings = len(claimed.get(canonical, ()))
-        if spellings < 2:
+        grouped = len(spellings.get(canonical, ()))
+        if grouped < 2:
             failures.append(
-                f"vendor map: {canonical!r} groups {spellings} spelling(s) in "
+                f"vendor map: {canonical!r} groups {grouped} spelling(s) in "
                 f"this backup, so it collapses nothing"
             )
 
-    stats = {
-        "source": LOCAL_VENDOR_MAP_PATH.name if isLocal else "packaged examples",
-        "aliases": aliases.aliasCount,
-        "canonical_names": len(aliases.canonicalNames),
-        "raw_vendors": len(vendors),
-        "after_canonicalization": len({aliases.canonicalFor(v) for v in vendors}),
-    }
+    stats.update(
+        {
+            "loaded": True,
+            "aliases": aliases.aliasCount,
+            "canonical_names": len(aliases.canonicalNames),
+            "claimed_vendors": sum(claimsPerAlias.values()),
+            "after_canonicalization": len({aliases.canonicalFor(v) for v in vendors}),
+            # (canonical, kind, alias, count), in canonical-name order
+            "claims": sorted(
+                (canonical, kind, alias, count)
+                for (kind, alias, canonical), count in claimsPerAlias.items()
+            ),
+        }
+    )
 
     return failures, stats, isLocal
 
@@ -724,21 +784,41 @@ def main(argv: list) -> int:
     print()
     print("-- vendor map: every alias live, every canonical name collapsing --")
     print(f"  source: {aliasStats['source']}")
-    print(
-        f"  {aliasStats['aliases']} aliases under "
-        f"{aliasStats['canonical_names']} canonical names"
-    )
-    print(
-        f"  {aliasStats['raw_vendors']} raw vendor strings -> "
-        f"{aliasStats['after_canonicalization']} canonical"
-    )
-    if isReference and usingLocalMap:
+    if aliasStats["loaded"]:
+        print(
+            f"  {aliasStats['aliases']} aliases under "
+            f"{aliasStats['canonical_names']} canonical names"
+        )
+        print(
+            f"  {aliasStats['raw_vendors']} raw vendor strings -> "
+            f"{aliasStats['after_canonicalization']} canonical; "
+            f"{aliasStats['claimed_vendors']} won by an alias"
+        )
+        # Names from the map file only -- never a vendor string. This is the
+        # list to read when claimed_vendors moves: it says which alias did.
+        print("  vendors won, per alias:")
+        for canonical, kind, alias, count in aliasStats["claims"]:
+            print(f"    {count:>4}  {kind:<6} {alias!r} -> {canonical!r}")
+
+    if not aliasStats["loaded"]:
+        # Whatever the backup: a table that does not load is broken config,
+        # and the run that reads it would exit 1.
+        failures.extend(aliasFailures)
+        print("  result: FAIL -- the table did not load")
+    elif isReference and usingLocalMap:
         # Asserted only where both halves line up: the table derived from this
         # corpus, checked against this corpus. Another backup may legitimately
         # lack a merchant the table knows about, and the packaged examples
         # match nothing anywhere by design -- in neither case does an idle
         # entry mean anything.
         failures.extend(aliasFailures)
+        for name, expectedValue in EXPECTED_VENDOR_MAP.items():
+            actualValue = aliasStats[name]
+            if actualValue != expectedValue:
+                aliasFailures.append(
+                    f"vendor map: {name} expected {expectedValue}, got {actualValue}"
+                )
+                failures.append(aliasFailures[-1])
         print(f"  result: {'ok' if not aliasFailures else 'MISS'}")
     elif not usingLocalMap:
         print(

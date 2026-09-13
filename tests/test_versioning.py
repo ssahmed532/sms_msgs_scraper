@@ -134,8 +134,8 @@ class TestVersionSources(unittest.TestCase):
 
 
 class TestReleaseShape(unittest.TestCase):
-    def test_this_release_is_a_patch_over_the_2_5_0_interface(self):
-        """2.5.2, chosen by what the release does to an existing caller.
+    def test_this_release_is_a_minor_over_the_2_5_x_interface(self):
+        """2.6.0, chosen by what the release does to an existing caller.
 
         2.0.0 was MAJOR because three things changed meaning: results moved to
         stdout while diagnostics moved to stderr, the tool gained an `sms-txn`
@@ -204,10 +204,27 @@ class TestReleaseShape(unittest.TestCase):
         non-transaction message no longer counts as an ambiguous duplicate;
         `--quiet` now silences the rules, notices and empty-state panels it
         left on stderr; and CI asserts the lockfile on every `uv` invocation.
+
+        2.6.0 is MINOR: the P2 items of the same review, and one of them adds
+        rows. `backup_info` now carries one message count per bank and one
+        skipped count per bank in its default output, and the skipped counts
+        come off the `<ID>_SKIPPED` buckets rather than the diagnostics -- a
+        warning keeps its transaction and is not a skip. The `--verbose`
+        section that counted every diagnostic is labelled `diagnostics`, which
+        is what it always counted; it was called `parseFailures`. Everything
+        else is a fix: axis ticks under ten keep a decimal, a series named
+        "Other" keeps its own slot, a wide total widens its column instead of
+        wrapping the row, a change past 999% is clamped, a bad date range or
+        an empty `--vendor` or a malformed `--vendor-map` is refused before the
+        backup is read, the alias loader refuses four more shapes it should
+        have, the sort key carries the card or account so the documented order
+        is total, an option written after FILEPATH is explained rather than
+        misread as the file, and an empty backup is reported as empty. No
+        existing invocation changes meaning; no amount, count or total moves.
         """
         major, minor, patch = projectVersion().split(".")
 
-        self.assertEqual((major, minor, patch), ("2", "5", "2"))
+        self.assertEqual((major, minor, patch), ("2", "6", "0"))
 
     def test_the_console_entry_point_is_declared(self):
         with PYPROJECT_PATH.open("rb") as handle:

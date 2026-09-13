@@ -508,6 +508,56 @@ class TestTheVendorMapOption(VendorCliTestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("not valid JSON", result.output)
 
+    def test_a_malformed_map_fails_before_the_backup_is_read(self):
+        """Validation used to run after the whole parse: a header, a summary
+        and the skip warnings on stderr, and then the exit. The map is loaded
+        up front whenever a vendor option is present."""
+        mapPath = self._tmpDir() / "broken.json"
+        mapPath.write_text("{not json", encoding="utf-8")
+
+        result = self.run_cli(
+            [
+                "--vendor-map",
+                str(mapPath),
+                str(self._standardBackup()),
+                "list_all_cc_txns",
+                "--canonical-vendors",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertNotIn("Messages parsed", result.stderr)
+
+    def test_canonical_vendors_with_an_empty_map_warns_that_nothing_is_renamed(self):
+        """An empty table loads -- it is how grouping is switched off -- but
+        asked to canonicalize with one, the flag silently did nothing."""
+        mapPath = self._mapFile({"schemaVersion": 1, "canonicalVendors": {}})
+        backupPath = self._standardBackup()
+
+        result = self.run_cli(
+            [
+                "--vendor-map",
+                str(mapPath),
+                str(backupPath),
+                "list_all_vendors",
+                "--canonical-vendors",
+            ]
+        )
+        quiet = self.run_cli(
+            [
+                "--quiet",
+                "--vendor-map",
+                str(mapPath),
+                str(backupPath),
+                "list_all_vendors",
+                "--canonical-vendors",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no entries", result.stderr)
+        self.assertEqual(quiet.stderr, "")
+
     def test_a_map_that_does_not_exist_is_a_usage_error(self):
         result = self.run_cli(
             [

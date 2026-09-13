@@ -48,7 +48,29 @@ from sms_msgs_scraper.render.tables import CURRENCY_COLUMN_ORDER
 # against both a dark and a light terminal. Cycling a colour back round would
 # give two series the same identity, which is worse than saying "Other".
 MAX_NAMED_SERIES = 4
-OTHER_SERIES = "Other"
+
+
+class _FoldBucket:
+    """The series everything past the fourth is collected into.
+
+    An object rather than the string "Other", because a series is named by
+    whatever the data says -- a vendor string, a canonical name -- and one of
+    those can perfectly well be "Other". Keyed on the string, a real series of
+    that name shared a slot with the fold bucket, so its amounts were added to
+    the bucket and its own glyph slot disappeared. Nothing in the data can be
+    equal to this object.
+    """
+
+    __slots__ = ()
+
+    def __str__(self) -> str:
+        return "Other"
+
+    def __repr__(self) -> str:
+        return "OTHER_SERIES"
+
+
+OTHER_SERIES = _FoldBucket()
 
 # One glyph per series, in the same order as the colours. Shade blocks rather
 # than shapes: they are single-width in every terminal font that ships with
@@ -64,9 +86,12 @@ GAP_GLYPH = "·"
 MIN_BAR_WIDTH = 20
 MAX_BAR_WIDTH = 56
 
-# What the fixed-width parts of a row cost, so the bar can have the rest.
+# What the fixed-width parts of a row cost, so the bar can have the rest. The
+# total column is sized from the data -- see `_totalColumnWidth` -- and is
+# never narrower than this. It used to be fixed, so a total of thirteen or
+# more characters ran past its column and wrapped the whole row.
 _LABEL_WIDTH = 11
-_TOTAL_WIDTH = 14
+_MIN_TOTAL_WIDTH = 13
 _DELTA_WIDTH = 10
 
 _LEGEND_NAME_LIMIT = 28
@@ -87,11 +112,33 @@ def _glyphForSlot(index: int) -> str:
     return SERIES_GLYPHS[index]
 
 
-def barWidthFor(consoleWidth: int) -> int:
-    """How wide the bars may be in a terminal of this width."""
-    available = consoleWidth - _LABEL_WIDTH - _TOTAL_WIDTH - _DELTA_WIDTH
+def barWidthFor(consoleWidth: int, totalWidth: int = _MIN_TOTAL_WIDTH) -> int:
+    """How wide the bars may be in a terminal of this width.
+
+    Clamped at both ends, so a terminal narrower than a label, the shortest
+    bar, a total and a change -- about 56 columns -- still gets a chart, and
+    every row of it wraps. There is no narrower layout to fall back to.
+    """
+    available = consoleWidth - _LABEL_WIDTH - totalWidth - _DELTA_WIDTH - 1
 
     return max(MIN_BAR_WIDTH, min(MAX_BAR_WIDTH, available))
+
+
+def _totalColumnWidth(monthlyAmountsByCurrency) -> int:
+    """The total column, sized to the widest total any chart in this run
+    prints, so the column is measured before the bar is given the rest.
+    """
+    widest = max(
+        (
+            len(Money(sum(amounts, Decimal(0)), currency).formatted())
+            for currency, monthlyAmounts in monthlyAmountsByCurrency
+            for amounts in monthlyAmounts.values()
+        ),
+        default=0,
+    )
+
+    # two spaces of indent, then the amount
+    return max(_MIN_TOTAL_WIDTH, widest + 2)
 
 
 def currenciesIn(perMonth) -> list[str]:
@@ -264,13 +311,17 @@ def _compactAmount(value: Decimal) -> str:
     two different ticks -- a chart whose largest month was 2,000 read
     `0  500  1k  2k  2k` -- and that is the scale a chart of one merchant
     lands on.
+
+    The same rule applies below a thousand, where the unit is the number
+    itself: a USD or CAD month is frequently single-digit, and a 3-scale axis
+    read `0 1 2 2 3` until it did.
     """
     if value >= 1_000_000:
         return _scaledTick(value / 1_000_000, "M")
     if value >= 1_000:
         return _scaledTick(value / 1_000, "k")
 
-    return f"{value:,.0f}"
+    return _scaledTick(value, "")
 
 
 def _scaledTick(scaled: Decimal, unit: str) -> str:
@@ -338,7 +389,9 @@ def _legendLine(names, slots):
     return segmentsText(parts)
 
 
-def _chartRow(monthKey, amounts, names, scale, currency, barWidth, previous):
+def _chartRow(
+    monthKey, amounts, names, scale, currency, barWidth, previous, totalWidth
+):
     """One month: its label, its stacked bar, its exact total, its change."""
     parts: list[tuple[str, str | None]] = [
         ("  ", None),
@@ -358,7 +411,7 @@ def _chartRow(monthKey, amounts, names, scale, currency, barWidth, previous):
 
     total = sum(amounts, Decimal(0))
     parts.append((" " * max(0, barWidth - sum(widths)), None))
-    parts.append((f"  {Money(total, currency).formatted():>11}", "column.total"))
+    parts.append((f"{Money(total, currency).formatted():>{totalWidth}}", "column.total"))
 
     # A change is only shown against the month immediately before. After a gap
     # there is nothing honest to compare against, so the column stays empty
@@ -373,7 +426,14 @@ def _chartRow(monthKey, amounts, names, scale, currency, barWidth, previous):
             arrow, style = "▼", "info"
         else:
             arrow, style = "=", "muted"
-        parts.append((f"  {arrow} {abs(change):5.1f}%", style))
+        # The column is fixed at five characters of figure. A change of a
+        # thousand percent or more -- a bill paid after a month of nothing
+        # much -- is clamped rather than allowed to widen the row and wrap it;
+        # the exact totals either side of it are on the same line.
+        figure = f"{abs(change):5.1f}"
+        if len(figure) > 5:
+            figure = " >999"
+        parts.append((f"  {arrow} {figure}%", style))
 
     return segmentsText(parts), total
 
@@ -430,22 +490,27 @@ def monthlyChart(perMonth, orderedNames, counts, seriesHeader, barWidth=None):
     stable series order the colours are assigned from; `counts` maps a
     `(series, currency)` pair to how many transactions it holds.
     """
-    if barWidth is None:
-        barWidth = barWidthFor(console.width)
-
     monthKeys = sorted(perMonth)
     everyMonth = monthKeysBetween(monthKeys[0], monthKeys[-1])
 
     currencies = currenciesIn(perMonth)
     names = selectSeries(perMonth, orderedNames, currencies)
 
+    # Folded once, up front, because the total column has to be measured
+    # across every chart in the run before the bars can be given the rest of
+    # the width -- and every chart in one run shares one bar width.
+    folded = [
+        (currency, *foldSeries(perMonth, currency, names)) for currency in currencies
+    ]
+    folded = [entry for entry in folded if entry[1]]
+    totalWidth = _totalColumnWidth((currency, amounts) for currency, amounts, _ in folded)
+
+    if barWidth is None:
+        barWidth = barWidthFor(console.width, totalWidth)
+
     blocks = []
 
-    for currency in currencies:
-        monthlyAmounts, slots = foldSeries(perMonth, currency, names)
-        if not monthlyAmounts:
-            continue
-
+    for currency, monthlyAmounts, slots in folded:
         scale = max(
             sum(amounts, Decimal(0)) for amounts in monthlyAmounts.values()
         )
@@ -465,6 +530,7 @@ def monthlyChart(perMonth, orderedNames, counts, seriesHeader, barWidth=None):
                 currency,
                 barWidth,
                 previous,
+                totalWidth,
             )
             rows.append(row)
             previous = total

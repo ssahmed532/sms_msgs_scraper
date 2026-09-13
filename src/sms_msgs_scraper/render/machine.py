@@ -178,12 +178,32 @@ def backupInfoRows(fileInfo, report, verbose: bool = False) -> list:
         _infoRow("envelope", "invalid", envelope.invalid),
         _infoRow("messages", "all", total),
         _infoRow("messages", "fromBank", total - duplicates - other),
+        # One row per bank, zeros included, by the sender table's own
+        # argument: a bank at zero is a finding, not an absence of data.
+        *(
+            _infoRow("messages", spec.id, report.count(spec.id), "from this bank")
+            for spec in REGISTRY
+        ),
         _infoRow("messages", "fromOtherSender", other),
         _infoRow(
             "messages",
             "duplicatesSuppressed",
             duplicates,
             f"policy {report.duplicatePolicy}",
+        ),
+        # Read off the <ID>_SKIPPED buckets, which count messages that carried
+        # a transaction signal and produced no transaction. Not off the
+        # diagnostics: a warning is a diagnostic too, and it keeps its
+        # transaction, so counting diagnostics here called a parsed
+        # transaction a failure.
+        *(
+            _infoRow(
+                "skipped",
+                spec.id,
+                report.count(spec.skippedBucket),
+                "carried a txn signal but could not be parsed",
+            )
+            for spec in REGISTRY
         ),
         _infoRow("transactions", "ccTxns", len(report.ccTxns)),
         _infoRow("transactions", "debitTxns", len(report.debitTxns)),
@@ -228,12 +248,16 @@ def backupInfoRows(fileInfo, report, verbose: bool = False) -> list:
         )
     )
 
-    failures = Counter(
+    # Every diagnostic by bank and reason, warnings included -- so labelled as
+    # what it is. The section used to be called parseFailures while counting
+    # exactly this, and the two coincide on the reference backup, which is
+    # what hid it.
+    diagnostics = Counter(
         (diagnostic.bank, str(diagnostic.reason))
         for diagnostic in report.diagnostics
     )
-    for (bank, reason), count in sorted(failures.items()):
-        rows.append(_infoRow("parseFailures", bank, count, reason))
+    for (bank, reason), count in sorted(diagnostics.items()):
+        rows.append(_infoRow("diagnostics", bank, count, reason))
 
     rows.append(_infoRow("duplicates", "policy", str(report.duplicatePolicy)))
     rows.append(_infoRow("duplicates", "suppressed", len(report.duplicates)))

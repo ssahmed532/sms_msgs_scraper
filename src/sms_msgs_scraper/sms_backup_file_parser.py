@@ -246,6 +246,11 @@ class SmsBackupFileParser:
 
         filepath = Path(filepath)
         size = filepath.stat().st_size
+        # Said plainly, before the XML parser gets to say "no element found:
+        # line 1, column 0" about it. A zero-byte backup is what an export that
+        # was interrupted before it began looks like.
+        if size == 0:
+            raise BackupFileError("the backup file is empty")
         if size > self.limits.maxBytes:
             raise BackupFileError(
                 f"backup file is {size:,} bytes, over the "
